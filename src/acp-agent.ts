@@ -60,7 +60,7 @@ import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
 import packageJson from '../package.json' with { type: 'json' };
 import { randomUUID } from "node:crypto";
-import { EXT_METHOD_NAME, ModelUsage } from '@lody/acp-extension';
+import { EXT_METHOD_NAME, ModelUsage } from 'acp-extension-core';
 
 export const CLAUDE_CONFIG_DIR = process.env.CLAUDE ?? path.join(os.homedir(), ".claude");
 
@@ -627,7 +627,6 @@ export class ClaudeAcpAgent implements Agent {
     } else {
       sessionId = randomUUID();
     }
-    this.logger.log(`[ACP] Session ID: ${sessionId}`);
 
     const input = new Pushable<SDKUserMessage>();
     const settingsManager = new SettingsManager(params.cwd, {
@@ -812,11 +811,6 @@ export class ClaudeAcpAgent implements Agent {
       settingsManager,
     };
 
-    // These calls wait for the Claude Code CLI to respond.
-    // They can hang if:
-    // 1. The CLI subprocess failed to start
-    // 2. The CLI is waiting for network/authentication
-    // 3. There are missing dependencies in the environment
     const availableCommands = await getAvailableSlashCommands(q);
     const models = await getAvailableModels(q);
     // Needs to happen after we return the session
