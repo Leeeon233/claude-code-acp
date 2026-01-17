@@ -58,8 +58,9 @@ import {
 } from "./tools.js";
 import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
-import packageJson from "../package.json" with { type: "json" };
+import packageJson from '../package.json' with { type: 'json' };
 import { randomUUID } from "node:crypto";
+import { EXT_METHOD_NAME, ModelUsage } from '@lody/acp-extension';
 
 export const CLAUDE_CONFIG_DIR = process.env.CLAUDE ?? path.join(os.homedir(), ".claude");
 
@@ -81,14 +82,14 @@ type Session = {
 
 type BackgroundTerminal =
   | {
-      handle: TerminalHandle;
-      status: "started";
-      lastOutput: TerminalOutputResponse | null;
-    }
+    handle: TerminalHandle;
+    status: "started";
+    lastOutput: TerminalOutputResponse | null;
+  }
   | {
-      status: "aborted" | "exited" | "killed" | "timedOut";
-      pendingOutput: TerminalOutputResponse;
-    };
+    status: "aborted" | "exited" | "killed" | "timedOut";
+    pendingOutput: TerminalOutputResponse;
+  };
 
 /**
  * Extra metadata that can be given to Claude Code when creating a new session.
@@ -296,6 +297,28 @@ export class ClaudeAcpAgent implements Agent {
               if (message.is_error) {
                 throw RequestError.internalError(undefined, message.result);
               }
+              const modelUsage: Record<string, ModelUsage> = {}
+              for (const [model, usage] of Object.entries(message.modelUsage)) {
+                // TODO: mapping model name
+                modelUsage[model] = {
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                  cacheReadInputTokens: usage.cacheReadInputTokens,
+                  cacheCreationInputTokens: usage.cacheCreationInputTokens,
+                  webSearchRequests: usage.webSearchRequests,
+                  costUSD: usage.costUSD
+                } as ModelUsage
+              }
+              const usages = {
+                usage: {
+                  inputTokens: message.usage.input_tokens,
+                  outputTokens: message.usage.output_tokens,
+                  cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
+                  cacheReadInputTokens: message.usage.cache_read_input_tokens,
+                },
+                modelUsage,
+              };
+              await this.client.extMethod(EXT_METHOD_NAME.usage_update, usages);
               return { stopReason: "end_turn" };
             }
             case "error_during_execution":
@@ -382,7 +405,7 @@ export class ClaudeAcpAgent implements Agent {
           const content =
             message.type === "assistant"
               ? // Handled by stream events above
-                message.message.content.filter((item) => !["text", "thinking"].includes(item.type))
+              message.message.content.filter((item) => !["text", "thinking"].includes(item.type))
               : message.message.content;
 
           for (const notification of toAcpNotifications(
@@ -604,14 +627,13 @@ export class ClaudeAcpAgent implements Agent {
     } else {
       sessionId = randomUUID();
     }
+    this.logger.log(`[ACP] Session ID: ${sessionId}`);
 
     const input = new Pushable<SDKUserMessage>();
-
     const settingsManager = new SettingsManager(params.cwd, {
       logger: this.logger,
     });
     await settingsManager.initialize();
-
     const mcpServers: Record<string, McpServerConfig> = {};
     if (Array.isArray(params.mcpServers)) {
       for (const server of params.mcpServers) {
@@ -790,9 +812,13 @@ export class ClaudeAcpAgent implements Agent {
       settingsManager,
     };
 
+    // These calls wait for the Claude Code CLI to respond.
+    // They can hang if:
+    // 1. The CLI subprocess failed to start
+    // 2. The CLI is waiting for network/authentication
+    // 3. There are missing dependencies in the environment
     const availableCommands = await getAvailableSlashCommands(q);
     const models = await getAvailableModels(q);
-
     // Needs to happen after we return the session
     setTimeout(() => {
       this.client.sessionUpdate({
@@ -881,10 +907,10 @@ async function getAvailableSlashCommands(query: Query): Promise<AvailableCommand
     .map((command) => {
       const input = command.argumentHint
         ? {
-            hint: Array.isArray(command.argumentHint)
-              ? command.argumentHint.join(" ")
-              : command.argumentHint,
-          }
+          hint: Array.isArray(command.argumentHint)
+            ? command.argumentHint.join(" ")
+            : command.argumentHint,
+        }
         : null;
       let name = command.name;
       if (command.name.endsWith(" (MCP)")) {
