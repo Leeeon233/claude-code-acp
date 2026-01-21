@@ -7,8 +7,6 @@ import * as https from 'https';
 import { execFileSync } from 'child_process';
 import { UsageData } from 'acp-extension-core'
 
-const debug = console.debug
-
 interface CredentialsFile {
     claudeAiOauth?: {
         accessToken?: string;
@@ -176,7 +174,6 @@ export async function getUsage(overrides: Partial<UsageApiDeps> = {}): Promise<U
 
         return result;
     } catch (error) {
-        debug('getUsage failed:', error);
         return null;
     }
 }
@@ -235,7 +232,6 @@ function readKeychainCredentials(now: number, homeDir: string): { accessToken: s
 
     // Check backoff to avoid re-prompting on every render after a failure
     if (isKeychainBackoff(homeDir, now)) {
-        debug('Keychain in backoff period, skipping');
         return null;
     }
 
@@ -257,7 +253,6 @@ function readKeychainCredentials(now: number, homeDir: string): { accessToken: s
     } catch (error) {
         // Security: Only log error message, not full error object (may contain stdout/stderr with tokens)
         const message = error instanceof Error ? error.message : 'unknown error';
-        debug('Failed to read from macOS Keychain:', message);
         // Record failure for backoff to avoid re-prompting
         recordKeychainFailure(homeDir, now);
         return null;
@@ -280,7 +275,6 @@ function readFileCredentials(homeDir: string, now: number): { accessToken: strin
         const data: CredentialsFile = JSON.parse(content);
         return parseCredentialsData(data, now);
     } catch (error) {
-        debug('Failed to read credentials file:', error);
         return null;
     }
 }
@@ -300,7 +294,6 @@ function parseCredentialsData(data: CredentialsFile, now: number): { accessToken
     // Use != null to handle expiresAt=0 correctly (would be expired)
     const expiresAt = data.claudeAiOauth?.expiresAt;
     if (expiresAt != null && expiresAt <= now) {
-        debug('OAuth token expired');
         return null;
     }
 
@@ -323,27 +316,23 @@ function readCredentials(
     const keychainCreds = readKeychain(now, homeDir);
     if (keychainCreds) {
         if (keychainCreds.subscriptionType) {
-            debug('Using credentials from macOS Keychain');
             return keychainCreds;
         }
         // Keychain has token but no subscriptionType - try to supplement from file
         const fileCreds = readFileCredentials(homeDir, now);
         if (fileCreds?.subscriptionType) {
-            debug('Using keychain token with file subscriptionType');
             return {
                 accessToken: keychainCreds.accessToken,
                 subscriptionType: fileCreds.subscriptionType,
             };
         }
         // No subscriptionType available - use keychain token anyway
-        debug('Using keychain token without subscriptionType');
         return keychainCreds;
     }
 
     // Fall back to file-based credentials (older versions or non-macOS)
     const fileCreds = readFileCredentials(homeDir, now);
     if (fileCreds) {
-        debug('Using credentials from file');
         return fileCreds;
     }
 
@@ -374,7 +363,6 @@ function parseDate(dateStr: string | undefined): number | null {
     const date = new Date(dateStr);
     // Check for Invalid Date
     if (isNaN(date.getTime())) {
-        debug('Invalid date string:', dateStr);
         return null;
     }
     return date.getMilliseconds()
@@ -403,7 +391,6 @@ function fetchUsageApi(accessToken: string): Promise<UsageApiResponse | null> {
 
             res.on('end', () => {
                 if (res.statusCode !== 200) {
-                    debug('API returned non-200 status:', res.statusCode);
                     resolve(null);
                     return;
                 }
@@ -412,18 +399,15 @@ function fetchUsageApi(accessToken: string): Promise<UsageApiResponse | null> {
                     const parsed: UsageApiResponse = JSON.parse(data);
                     resolve(parsed);
                 } catch (error) {
-                    debug('Failed to parse API response:', error);
                     resolve(null);
                 }
             });
         });
 
         req.on('error', (error) => {
-            debug('API request error:', error);
             resolve(null);
         });
         req.on('timeout', () => {
-            debug('API request timeout');
             req.destroy();
             resolve(null);
         });
