@@ -5,17 +5,9 @@ import * as path from 'path';
 import * as os from 'os';
 import * as https from 'https';
 import { execFileSync } from 'child_process';
+import { UsageData } from 'acp-extension-core'
 
 const debug = console.debug
-
-export interface UsageData {
-    planName: string | null;  // 'Max', 'Pro', or null for API users
-    fiveHour: number | null;  // 0-100 percentage, null if unavailable
-    sevenDay: number | null;  // 0-100 percentage, null if unavailable
-    fiveHourResetAt: Date | null;
-    sevenDayResetAt: Date | null;
-    apiUnavailable?: boolean; // true if API call failed (user should check DEBUG logs)
-}
 
 interface CredentialsFile {
     claudeAiOauth?: {
@@ -70,10 +62,10 @@ function readCache(homeDir: string, now: number): UsageData | null {
         // new Date() handles both Date objects and ISO strings safely.
         const data = cache.data;
         if (data.fiveHourResetAt) {
-            data.fiveHourResetAt = new Date(data.fiveHourResetAt);
+            data.fiveHourResetAt = data.fiveHourResetAt;
         }
         if (data.sevenDayResetAt) {
-            data.sevenDayResetAt = new Date(data.sevenDayResetAt);
+            data.sevenDayResetAt = data.sevenDayResetAt;
         }
 
         return data;
@@ -377,7 +369,7 @@ function parseUtilization(value: number | undefined): number | null {
 }
 
 /** Parse ISO date string safely, returning null for invalid dates */
-function parseDate(dateStr: string | undefined): Date | null {
+function parseDate(dateStr: string | undefined): number | null {
     if (!dateStr) return null;
     const date = new Date(dateStr);
     // Check for Invalid Date
@@ -385,7 +377,7 @@ function parseDate(dateStr: string | undefined): Date | null {
         debug('Invalid date string:', dateStr);
         return null;
     }
-    return date;
+    return date.getMilliseconds()
 }
 
 function fetchUsageApi(accessToken: string): Promise<UsageApiResponse | null> {

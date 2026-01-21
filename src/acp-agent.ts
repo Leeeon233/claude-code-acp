@@ -61,6 +61,7 @@ import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/re
 import packageJson from '../package.json' with { type: 'json' };
 import { randomUUID } from "node:crypto";
 import { EXT_METHOD_NAME, ModelUsage, SessionUsageUpdate } from 'acp-extension-core';
+import { getUsage } from "./usage.js";
 
 export const CLAUDE_CONFIG_DIR = process.env.CLAUDE ?? path.join(os.homedir(), ".claude");
 
@@ -320,6 +321,7 @@ export class ClaudeAcpAgent implements Agent {
                 modelUsage,
               };
               await this.client.extMethod(EXT_METHOD_NAME.usage_update, usages);
+              await this.client.extMethod(EXT_METHOD_NAME.rate_limits, (await getUsage()) as Record<string, unknown>)
               return { stopReason: "end_turn" };
             }
             case "error_during_execution":
