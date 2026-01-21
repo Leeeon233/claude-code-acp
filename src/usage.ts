@@ -163,8 +163,8 @@ export async function getUsage(overrides: Partial<UsageApiDeps> = {}): Promise<U
 
         const result: UsageData = {
             planName,
-            fiveHour,
-            sevenDay,
+            fiveHour: fiveHour ? fiveHour / 100 : null,
+            sevenDay: sevenDay ? sevenDay / 100 : null,
             fiveHourResetAt,
             sevenDayResetAt,
         };
