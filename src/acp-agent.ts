@@ -321,7 +321,10 @@ export class ClaudeAcpAgent implements Agent {
                 modelUsage,
               };
               await this.client.extMethod(EXT_METHOD_NAME.usage_update, usages);
-              await this.client.extMethod(EXT_METHOD_NAME.rate_limits, (await getUsage()) as Record<string, unknown>)
+              const limits = await getUsage();
+              if (!limits?.apiUnavailable) {
+                await this.client.extMethod(EXT_METHOD_NAME.rate_limits, limits as Record<string, unknown>)
+              }
               return { stopReason: "end_turn" };
             }
             case "error_during_execution":
