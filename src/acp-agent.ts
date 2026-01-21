@@ -60,7 +60,7 @@ import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
 import packageJson from '../package.json' with { type: 'json' };
 import { randomUUID } from "node:crypto";
-import { EXT_METHOD_NAME, ModelUsage } from 'acp-extension-core';
+import { EXT_METHOD_NAME, ModelUsage, SessionUsageUpdate } from 'acp-extension-core';
 
 export const CLAUDE_CONFIG_DIR = process.env.CLAUDE ?? path.join(os.homedir(), ".claude");
 
@@ -306,15 +306,16 @@ export class ClaudeAcpAgent implements Agent {
                   cacheReadInputTokens: usage.cacheReadInputTokens,
                   cacheCreationInputTokens: usage.cacheCreationInputTokens,
                   webSearchRequests: usage.webSearchRequests,
-                  costUSD: usage.costUSD
+                  costUSD: usage.costUSD,
+                  contextWindow: usage.contextWindow
                 } as ModelUsage
               }
-              const usages = {
+              const usages: SessionUsageUpdate = {
                 usage: {
                   inputTokens: message.usage.input_tokens,
                   outputTokens: message.usage.output_tokens,
                   cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
-                  cacheReadInputTokens: message.usage.cache_read_input_tokens,
+                  cacheReadInputTokens: message.usage.cache_read_input_tokens
                 },
                 modelUsage,
               };
