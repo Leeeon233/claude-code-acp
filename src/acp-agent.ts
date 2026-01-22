@@ -299,24 +299,25 @@ export class ClaudeAcpAgent implements Agent {
                 throw RequestError.internalError(undefined, message.result);
               }
               const modelUsage: Record<string, ModelUsage> = {}
+              let contextWindow = 0;
               for (const [model, usage] of Object.entries(message.modelUsage)) {
-                // TODO: mapping model name
                 modelUsage[model] = {
                   inputTokens: usage.inputTokens,
                   outputTokens: usage.outputTokens,
                   cacheReadInputTokens: usage.cacheReadInputTokens,
                   cacheCreationInputTokens: usage.cacheCreationInputTokens,
                   webSearchRequests: usage.webSearchRequests,
-                  costUSD: usage.costUSD,
-                  contextWindow: usage.contextWindow
+                  costUSD: usage.costUSD
                 } as ModelUsage
+                contextWindow = Math.max(contextWindow, usage.contextWindow);
               }
               const usages: SessionUsageUpdate = {
                 usage: {
                   inputTokens: message.usage.input_tokens,
                   outputTokens: message.usage.output_tokens,
                   cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
-                  cacheReadInputTokens: message.usage.cache_read_input_tokens
+                  cacheReadInputTokens: message.usage.cache_read_input_tokens,
+                  contextWindow
                 },
                 modelUsage,
               };
