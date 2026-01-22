@@ -163,8 +163,8 @@ export async function getUsage(overrides: Partial<UsageApiDeps> = {}): Promise<U
 
         const result: UsageData = {
             planName,
-            fiveHour: fiveHour ? fiveHour / 100 : null,
-            sevenDay: sevenDay ? sevenDay / 100 : null,
+            fiveHour: fiveHour !== null ? fiveHour / 100 : null,
+            sevenDay: sevenDay !== null ? sevenDay / 100 : null,
             fiveHourResetAt,
             sevenDayResetAt,
         };
@@ -365,7 +365,7 @@ function parseDate(dateStr: string | undefined): number | null {
     if (isNaN(date.getTime())) {
         return null;
     }
-    return date.getMilliseconds()
+    return date.getTime()
 }
 
 function fetchUsageApi(accessToken: string): Promise<UsageApiResponse | null> {
