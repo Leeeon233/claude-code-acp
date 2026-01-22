@@ -29,9 +29,6 @@ interface UsageApiResponse {
     };
 }
 
-// File-based cache (HUD runs as new process each render, so in-memory cache won't persist)
-const CACHE_TTL_MS = 60_000; // 60 seconds
-const CACHE_FAILURE_TTL_MS = 15_000; // 15 seconds for failed requests
 const KEYCHAIN_TIMEOUT_MS = 5000;
 const KEYCHAIN_BACKOFF_MS = 60_000; // Backoff on keychain failures to avoid re-prompting
 
@@ -40,53 +37,6 @@ interface CacheFile {
     timestamp: number;
 }
 
-function getCachePath(homeDir: string): string {
-    return path.join(homeDir, '.claude', 'plugins', 'claude-hud', '.usage-cache.json');
-}
-
-function readCache(homeDir: string, now: number): UsageData | null {
-    try {
-        const cachePath = getCachePath(homeDir);
-        if (!fs.existsSync(cachePath)) return null;
-
-        const content = fs.readFileSync(cachePath, 'utf8');
-        const cache: CacheFile = JSON.parse(content);
-
-        // Check TTL - use shorter TTL for failure results
-        const ttl = cache.data.apiUnavailable ? CACHE_FAILURE_TTL_MS : CACHE_TTL_MS;
-        if (now - cache.timestamp >= ttl) return null;
-
-        // JSON.stringify converts Date to ISO string, so we need to reconvert on read.
-        // new Date() handles both Date objects and ISO strings safely.
-        const data = cache.data;
-        if (data.fiveHourResetAt) {
-            data.fiveHourResetAt = data.fiveHourResetAt;
-        }
-        if (data.sevenDayResetAt) {
-            data.sevenDayResetAt = data.sevenDayResetAt;
-        }
-
-        return data;
-    } catch {
-        return null;
-    }
-}
-
-function writeCache(homeDir: string, data: UsageData, timestamp: number): void {
-    try {
-        const cachePath = getCachePath(homeDir);
-        const cacheDir = path.dirname(cachePath);
-
-        if (!fs.existsSync(cacheDir)) {
-            fs.mkdirSync(cacheDir, { recursive: true });
-        }
-
-        const cache: CacheFile = { data, timestamp };
-        fs.writeFileSync(cachePath, JSON.stringify(cache), 'utf8');
-    } catch {
-        // Ignore cache write failures
-    }
-}
 
 // Dependency injection for testing
 export type UsageApiDeps = {
@@ -116,12 +66,6 @@ export async function getUsage(overrides: Partial<UsageApiDeps> = {}): Promise<U
     const now = deps.now();
     const homeDir = deps.homeDir();
 
-    // Check file-based cache first
-    const cached = readCache(homeDir, now);
-    if (cached) {
-        return cached;
-    }
-
     try {
         const credentials = readCredentials(homeDir, now, deps.readKeychain);
         if (!credentials) {
@@ -149,7 +93,6 @@ export async function getUsage(overrides: Partial<UsageApiDeps> = {}): Promise<U
                 sevenDayResetAt: null,
                 apiUnavailable: true,
             };
-            writeCache(homeDir, failureResult, now);
             return failureResult;
         }
 
@@ -168,9 +111,6 @@ export async function getUsage(overrides: Partial<UsageApiDeps> = {}): Promise<U
             fiveHourResetAt,
             sevenDayResetAt,
         };
-
-        // Write to file cache
-        writeCache(homeDir, result, now);
 
         return result;
     } catch (error) {
@@ -414,18 +354,4 @@ function fetchUsageApi(accessToken: string): Promise<UsageApiResponse | null> {
 
         req.end();
     });
-}
-
-// Export for testing
-export function clearCache(homeDir?: string): void {
-    if (homeDir) {
-        try {
-            const cachePath = getCachePath(homeDir);
-            if (fs.existsSync(cachePath)) {
-                fs.unlinkSync(cachePath);
-            }
-        } catch {
-            // Ignore
-        }
-    }
 }
