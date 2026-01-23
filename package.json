@@ -17,6 +17,7 @@
   },
   "files": [
     "dist/",
+    "!dist/tests/",
     "README.md",
     "LICENSE",
     "package.json"
