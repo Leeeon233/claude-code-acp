@@ -293,7 +293,7 @@ export class ClaudeAcpAgent implements Agent {
           switch (message.subtype) {
             case "success": {
               if (message.result.includes("Please run /login")) {
-                throw RequestError.authRequired();
+                throw RequestError.authRequired(undefined, message.result);
               }
               if (message.is_error) {
                 throw RequestError.internalError(undefined, message.result);
@@ -406,7 +406,7 @@ export class ClaudeAcpAgent implements Agent {
             message.message.content[0].type === "text" &&
             message.message.content[0].text.includes("Please run /login")
           ) {
-            throw RequestError.authRequired();
+            throw RequestError.authRequired(undefined, message.message.content[0].text);
           }
 
           const content =
