@@ -9,6 +9,8 @@ import {
   ForkSessionResponse,
   InitializeRequest,
   InitializeResponse,
+  ListSessionsRequest,
+  ListSessionsResponse,
   ndJsonStream,
   NewSessionRequest,
   NewSessionResponse,
@@ -19,6 +21,7 @@ import {
   RequestError,
   ResumeSessionRequest,
   ResumeSessionResponse,
+  SessionInfo,
   SessionModelState,
   SessionNotification,
   SetSessionModelRequest,
@@ -62,8 +65,44 @@ import packageJson from '../package.json' with { type: 'json' };
 import { randomUUID } from "node:crypto";
 import { EXT_METHOD_NAME, ModelUsage, SessionUsageUpdate } from 'acp-extension-core';
 import { getUsage } from "./usage.js";
+import { fileURLToPath } from "node:url";
 
-export const CLAUDE_CONFIG_DIR = process.env.CLAUDE ?? path.join(os.homedir(), ".claude");
+export const CLAUDE_CONFIG_DIR =
+  process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+
+/**
+ * Decode a Claude project path encoding back to the original filesystem path.
+ * Claude encodes paths by replacing path separators with dashes:
+ * - Unix: "/Users/morse/project" -> "-Users-morse-project"
+ * - Windows: "C:\Users\morse\project" -> "C-Users-morse-project"
+ */
+function decodeProjectPath(encodedPath: string): string {
+  // Check if this looks like a Windows path (starts with drive letter pattern like "C-")
+  const windowsDriveMatch = encodedPath.match(/^([A-Za-z])-/);
+  if (windowsDriveMatch) {
+    // Windows path: "C-Users-morse-project" -> "C:\Users\morse\project"
+    const driveLetter = windowsDriveMatch[1];
+    const rest = encodedPath.slice(2); // Skip "C-"
+    return `${driveLetter}:\\${rest.replace(/-/g, "\\")}`;
+  }
+
+  // Unix path: "-Users-morse-project" -> "/Users/morse/project"
+  return encodedPath.replace(/-/g, "/");
+}
+
+const MAX_TITLE_LENGTH = 128;
+
+function sanitizeTitle(text: string): string {
+  // Replace newlines and collapse whitespace
+  const sanitized = text
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (sanitized.length <= MAX_TITLE_LENGTH) {
+    return sanitized;
+  }
+  return sanitized.slice(0, MAX_TITLE_LENGTH - 1) + "…";
+}
 
 /**
  * Logger interface for customizing logging output
@@ -126,17 +165,18 @@ export type ToolUpdateMeta = {
   };
 };
 
-type ToolUseCache = {
+export type ToolUseCache = {
   [key: string]: {
     type: "tool_use" | "server_tool_use" | "mcp_tool_use";
     id: string;
     name: string;
-    input: any;
+    input: unknown;
   };
 };
 
 // Bypass Permissions doesn't work if we are a root/sudo user
 const IS_ROOT = (process.geteuid?.() ?? process.getuid?.()) === 0;
+const ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX;
 
 // Implement the ACP Agent interface
 export class ClaudeAcpAgent implements Agent {
@@ -167,17 +207,17 @@ export class ClaudeAcpAgent implements Agent {
     };
 
     // If client supports terminal-auth capability, use that instead.
-    // if (request.clientCapabilities?._meta?.["terminal-auth"] === true) {
-    //   const cliPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk/cli.js"));
+    if (request.clientCapabilities?._meta?.["terminal-auth"] === true) {
+      const cliPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk/cli.js"));
 
-    //   authMethod._meta = {
-    //     "terminal-auth": {
-    //       command: "node",
-    //       args: [cliPath, "/login"],
-    //       label: "Claude Code Login",
-    //     },
-    //   };
-    // }
+      authMethod._meta = {
+        "terminal-auth": {
+          command: "node",
+          args: [cliPath, "/login"],
+          label: "Claude Code Login",
+        },
+      };
+    }
 
     return {
       protocolVersion: 1,
@@ -192,6 +232,7 @@ export class ClaudeAcpAgent implements Agent {
         },
         sessionCapabilities: {
           fork: {},
+          list: {},
           resume: {},
         },
       },
@@ -247,6 +288,149 @@ export class ClaudeAcpAgent implements Agent {
     return response;
   }
 
+  /**
+   * List Claude Code sessions by parsing JSONL files
+   * Sessions are stored in ~/.claude/projects/<path-encoded>/
+   * Implements the draft session/list RFD spec
+   */
+  async unstable_listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+    // Note: We load all sessions into memory for sorting, so pagination here is for
+    // API response size limits rather than memory efficiency. This matches the RFD spec.
+    const PAGE_SIZE = 50;
+    const claudeDir = path.join(CLAUDE_CONFIG_DIR, "projects");
+
+    try {
+      await fs.promises.access(claudeDir);
+    } catch {
+      return { sessions: [] };
+    }
+
+    // Collect all sessions across all project directories
+    const allSessions: SessionInfo[] = [];
+
+    try {
+      const projectDirs = await fs.promises.readdir(claudeDir);
+
+      for (const encodedPath of projectDirs) {
+        const projectDir = path.join(claudeDir, encodedPath);
+        const stat = await fs.promises.stat(projectDir);
+        if (!stat.isDirectory()) continue;
+
+        // Decode the path based on platform:
+        // - Unix: "-Users-morse-project" -> "/Users/morse/project"
+        // - Windows: "C-Users-morse-project" -> "C:\Users\morse\project"
+        const decodedCwd = decodeProjectPath(encodedPath);
+
+        // Skip if filtering by cwd and this doesn't match
+        if (params.cwd && decodedCwd !== params.cwd) continue;
+
+        const files = await fs.promises.readdir(projectDir);
+        // Filter to user session files only. Skip agent-*.jsonl files which contain
+        // internal agent metadata and system logs, not user-visible conversation sessions.
+        const jsonlFiles = files.filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
+
+        for (const file of jsonlFiles) {
+          const filePath = path.join(projectDir, file);
+          try {
+            const content = await fs.promises.readFile(filePath, "utf-8");
+            const lines = content.trim().split("\n").filter(Boolean);
+
+            const firstLine = lines[0];
+            if (!firstLine) continue;
+
+            // Parse first line to get session info
+            const firstEntry = JSON.parse(firstLine);
+            const sessionId = firstEntry.sessionId || file.replace(".jsonl", "");
+
+            // Find first user message for title
+            let title: string | undefined;
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                if (entry.type === "user" && entry.message?.content) {
+                  const msgContent = entry.message.content;
+                  if (typeof msgContent === "string") {
+                    title = sanitizeTitle(msgContent);
+                    break;
+                  }
+                  if (Array.isArray(msgContent) && msgContent.length > 0) {
+                    const first = msgContent[0];
+                    const text =
+                      typeof first === "string"
+                        ? first
+                        : first && typeof first === "object" && typeof first.text === "string"
+                          ? first.text
+                          : undefined;
+                    if (text) {
+                      title = sanitizeTitle(text);
+                      break;
+                    }
+                  }
+                }
+              } catch {
+                // Skip malformed lines
+              }
+            }
+
+            // Get file modification time as updatedAt
+            const fileStat = await fs.promises.stat(filePath);
+            const updatedAt = fileStat.mtime.toISOString();
+
+            allSessions.push({
+              sessionId,
+              cwd: decodedCwd,
+              title: title ?? null,
+              updatedAt,
+            });
+          } catch (err) {
+            this.logger.error(
+              `[unstable_listSessions] Failed to parse session file: ${filePath}`,
+              err,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.error("[unstable_listSessions] Failed to list sessions", err);
+      return { sessions: [] };
+    }
+
+    // Sort by updatedAt descending (most recent first)
+    allSessions.sort((a, b) => {
+      const timeA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      return timeB - timeA;
+    });
+
+    // Handle pagination with cursor
+    let startIndex = 0;
+    if (params.cursor) {
+      try {
+        const decoded = Buffer.from(params.cursor, "base64").toString("utf-8");
+        const cursorData = JSON.parse(decoded);
+        startIndex = cursorData.offset ?? 0;
+      } catch {
+        // Invalid cursor, start from beginning
+      }
+    }
+
+    const pageOfSessions = allSessions.slice(startIndex, startIndex + PAGE_SIZE);
+    const hasMore = startIndex + PAGE_SIZE < allSessions.length;
+
+    const response: ListSessionsResponse = {
+      sessions: pageOfSessions,
+    };
+
+    if (hasMore) {
+      const nextCursor = Buffer.from(JSON.stringify({ offset: startIndex + PAGE_SIZE })).toString(
+        "base64",
+      );
+      response.nextCursor = nextCursor;
+    }
+
+    return response;
+  }
+
   async authenticate(_params: AuthenticateRequest): Promise<void> {
     throw new Error("Method not implemented.");
   }
@@ -276,8 +460,12 @@ export class ClaudeAcpAgent implements Agent {
             case "init":
               break;
             case "compact_boundary":
+            case "hook_started":
+            case "task_notification":
+            case "hook_progress":
             case "hook_response":
             case "status":
+            case "files_persisted":
               // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
               break;
             default:
@@ -376,6 +564,21 @@ export class ClaudeAcpAgent implements Agent {
             typeof message.message.content === "string" &&
             message.message.content.includes("<local-command-stdout>")
           ) {
+            // Handle /context by sending its reply as regular agent message.
+            if (message.message.content.includes("Context Usage")) {
+              for (const notification of toAcpNotifications(
+                message.message.content
+                  .replace("<local-command-stdout>", "")
+                  .replace("</local-command-stdout>", ""),
+                "assistant",
+                params.sessionId,
+                this.toolUseCache,
+                this.client,
+                this.logger,
+              )) {
+                await this.client.sessionUpdate(notification);
+              }
+            }
             this.logger.log(message.message.content);
             break;
           }
@@ -428,6 +631,7 @@ export class ClaudeAcpAgent implements Agent {
           break;
         }
         case "tool_progress":
+        case "tool_use_summary":
           break;
         case "auth_status":
           break;
@@ -716,7 +920,7 @@ export class ClaudeAcpAgent implements Agent {
       extraArgs,
       // If we want bypassPermissions to be an option, we have to allow it here.
       // But it doesn't work in root mode, so we only activate it if it will work.
-      allowDangerouslySkipPermissions: !IS_ROOT,
+      allowDangerouslySkipPermissions: ALLOW_BYPASS,
       permissionMode,
       canUseTool: this.canUseTool(sessionId),
       // note: although not documented by the types, passing an absolute path
@@ -737,7 +941,23 @@ export class ClaudeAcpAgent implements Agent {
         PostToolUse: [
           ...(userProvidedOptions?.hooks?.PostToolUse || []),
           {
-            hooks: [createPostToolUseHook(this.logger)],
+            hooks: [
+              createPostToolUseHook(this.logger, {
+                onEnterPlanMode: async () => {
+                  const session = this.sessions[sessionId];
+                  if (session) {
+                    session.permissionMode = "plan";
+                  }
+                  await this.client.sessionUpdate({
+                    sessionId,
+                    update: {
+                      sessionUpdate: "current_mode_update",
+                      currentModeId: "plan",
+                    },
+                  });
+                },
+              }),
+            ],
           },
         ],
       },
@@ -819,7 +1039,8 @@ export class ClaudeAcpAgent implements Agent {
     };
 
     const availableCommands = await getAvailableSlashCommands(q);
-    const models = await getAvailableModels(q);
+    const models = await getAvailableModels(q, settingsManager);
+
     // Needs to happen after we return the session
     setTimeout(() => {
       this.client.sessionUpdate({
@@ -854,7 +1075,7 @@ export class ClaudeAcpAgent implements Agent {
       },
     ];
     // Only works in non-root mode
-    if (!IS_ROOT) {
+    if (ALLOW_BYPASS) {
       availableModes.push({
         id: "bypassPermissions",
         name: "Bypass Permissions",
@@ -873,28 +1094,43 @@ export class ClaudeAcpAgent implements Agent {
   }
 }
 
-async function getAvailableModels(query: Query): Promise<SessionModelState> {
+async function getAvailableModels(
+  query: Query,
+  settingsManager: SettingsManager,
+): Promise<SessionModelState> {
   const models = await query.supportedModels();
+  const settings = settingsManager.getSettings();
 
-  // Query doesn't give us access to the currently selected model, so we just choose the first model in the list.
-  const currentModel = models[0];
+  let currentModel = models[0];
+
+  if (settings.model) {
+    const match = models.find(
+      (m) =>
+        m.value === settings.model ||
+        m.value.includes(settings.model!) ||
+        settings.model!.includes(m.value) ||
+        m.displayName.toLowerCase() === settings.model!.toLowerCase() ||
+        m.displayName.toLowerCase().includes(settings.model!.toLowerCase()),
+    );
+    if (match) {
+      currentModel = match;
+    }
+  }
+
   await query.setModel(currentModel.value);
 
-  const availableModels = models.map((model) => ({
-    modelId: model.value,
-    name: model.displayName,
-    description: model.description,
-  }));
-
   return {
-    availableModels,
+    availableModels: models.map((model) => ({
+      modelId: model.value,
+      name: model.displayName,
+      description: model.description,
+    })),
     currentModelId: currentModel.value,
   };
 }
 
 async function getAvailableSlashCommands(query: Query): Promise<AvailableCommand[]> {
   const UNSUPPORTED_COMMANDS = [
-    "context",
     "cost",
     "login",
     "logout",
@@ -1173,6 +1409,7 @@ export function toAcpNotifications(
             toolCallId: chunk.tool_use_id,
             sessionUpdate: "tool_call_update",
             status: "is_error" in chunk && chunk.is_error ? "failed" : "completed",
+            rawOutput: chunk.content,
             ...toolUpdateFromToolResult(chunk, toolUseCache[chunk.tool_use_id]),
           };
         }
