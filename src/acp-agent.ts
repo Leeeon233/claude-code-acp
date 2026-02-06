@@ -1132,6 +1132,7 @@ async function getAvailableModels(
 async function getAvailableSlashCommands(query: Query): Promise<AvailableCommand[]> {
   const UNSUPPORTED_COMMANDS = [
     "cost",
+    "keybindings-help",
     "login",
     "logout",
     "output-style:new",
@@ -1423,6 +1424,8 @@ export function toAcpNotifications(
       case "citations_delta":
       case "signature_delta":
       case "container_upload":
+      case "compaction":
+      case "compaction_delta":
         break;
 
       default:
