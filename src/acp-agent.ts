@@ -538,7 +538,35 @@ export class ClaudeAcpAgent implements Agent {
                 session.accumulatedUsage.cachedReadTokens +
                 session.accumulatedUsage.cachedWriteTokens,
             };
-
+            // =====================
+            const modelUsage: Record<string, ModelUsage> = {}
+            let contextWindow = 0;
+            for (const [model, usage] of Object.entries(message.modelUsage)) {
+              modelUsage[model] = {
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheReadInputTokens: usage.cacheReadInputTokens,
+                cacheCreationInputTokens: usage.cacheCreationInputTokens,
+                webSearchRequests: usage.webSearchRequests,
+                costUSD: usage.costUSD
+              } as ModelUsage
+              contextWindow = Math.max(contextWindow, usage.contextWindow);
+            }
+            const usages: SessionUsageUpdate = {
+              usage: {
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheCreationInputTokens: usage.cachedWriteTokens || undefined,
+                cacheReadInputTokens: usage.cachedReadTokens || 0
+              },
+              modelUsage,
+            };
+            await this.client.extMethod(EXT_METHOD_NAME.usage_update, usages);
+            const limits = await getUsage();
+            if (!limits?.apiUnavailable) {
+              await this.client.extMethod(EXT_METHOD_NAME.rate_limits, limits as Record<string, unknown>)
+            }
+            // =====================
             switch (message.subtype) {
               case "success": {
                 if (message.result.includes("Please run /login")) {
