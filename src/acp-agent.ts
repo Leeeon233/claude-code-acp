@@ -84,7 +84,7 @@ import {
 } from "./tools.js";
 import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
-import packageJson from '../package.json' with { type: 'json' };
+import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
 import { EXT_METHOD_NAME, ModelUsage, SessionUsageUpdate } from 'acp-extension-core';
 import { getUsage } from "./usage.js";
@@ -547,7 +547,7 @@ export class ClaudeAcpAgent implements Agent {
                 if (message.is_error) {
                   throw RequestError.internalError(undefined, message.result);
                 }
-                return { stopReason: "end_turn" };
+                return { stopReason: "end_turn", usage };
               }
               case "error_during_execution":
                 if (message.is_error) {
@@ -556,7 +556,7 @@ export class ClaudeAcpAgent implements Agent {
                     message.errors.join(", ") || message.subtype,
                   );
                 }
-                return { stopReason: "end_turn" };
+                return { stopReason: "end_turn", usage };
               case "error_max_budget_usd":
               case "error_max_turns":
               case "error_max_structured_output_retries":
@@ -566,7 +566,7 @@ export class ClaudeAcpAgent implements Agent {
                     message.errors.join(", ") || message.subtype,
                   );
                 }
-                return { stopReason: "max_turn_requests" };
+                return { stopReason: "max_turn_requests", usage };
               default:
                 unreachable(message, this.logger);
                 break;
@@ -588,8 +588,31 @@ export class ClaudeAcpAgent implements Agent {
           }
           case "user":
           case "assistant": {
-            if (this.sessions[params.sessionId].cancelled) {
+            if (session.cancelled) {
               break;
+            }
+
+            // Check for queued prompt replay
+            if (message.type === "user" && "uuid" in message && message.uuid) {
+              const pending = session.pendingMessages.get(message.uuid as string);
+              if (pending) {
+                pending.resolve(false);
+                session.pendingMessages.delete(message.uuid as string);
+                handedOff = true;
+                // the current loop stops with end_turn,
+                // the loop of the next prompt continues running
+                return { stopReason: "end_turn" };
+              }
+            }
+
+            // Store latest assistant usage (excluding subagents)
+            if ((message.message as any).usage && message.parent_tool_use_id === null) {
+              const messageWithUsage = message.message as unknown as SDKResultMessage;
+              lastAssistantTotalUsage =
+                messageWithUsage.usage.input_tokens +
+                messageWithUsage.usage.output_tokens +
+                messageWithUsage.usage.cache_read_input_tokens +
+                messageWithUsage.usage.cache_creation_input_tokens;
             }
 
             // Slash commands like /compact can generate invalid output... doesn't match
@@ -650,7 +673,9 @@ export class ClaudeAcpAgent implements Agent {
             const content =
               message.type === "assistant"
                 ? // Handled by stream events above
-                message.message.content.filter((item) => !["text", "thinking"].includes(item.type))
+                message.message.content.filter(
+                  (item) => !["text", "thinking"].includes(item.type),
+                )
                 : message.message.content;
 
             for (const notification of toAcpNotifications(
@@ -1015,10 +1040,12 @@ export class ClaudeAcpAgent implements Agent {
     }
 
     const input = new Pushable<SDKUserMessage>();
+
     const settingsManager = new SettingsManager(params.cwd, {
       logger: this.logger,
     });
     await settingsManager.initialize();
+
     const mcpServers: Record<string, McpServerConfig> = {};
     if (Array.isArray(params.mcpServers)) {
       for (const server of params.mcpServers) {
