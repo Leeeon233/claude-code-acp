@@ -554,10 +554,10 @@ export class ClaudeAcpAgent implements Agent {
             }
             const usages: SessionUsageUpdate = {
               usage: {
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                cacheCreationInputTokens: usage.cachedWriteTokens || undefined,
-                cacheReadInputTokens: usage.cachedReadTokens || 0
+                inputTokens: message.usage.input_tokens,
+                outputTokens: message.usage.output_tokens,
+                cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
+                cacheReadInputTokens: message.usage.cache_read_input_tokens,
               },
               modelUsage,
             };
