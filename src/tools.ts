@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   ContentBlock,
   PlanEntry,
@@ -74,7 +75,7 @@ import {
   TodoWriteInput,
   WebFetchInput,
   WebSearchInput,
-} from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
+} from "@anthropic-ai/claude-code/sdk-tools.js";
 
 interface ToolInfo {
   title: string;
@@ -103,13 +104,29 @@ interface ToolUpdate {
   };
 }
 
+/**
+ * Convert an absolute file path to a project-relative path for display.
+ * Returns the original path if it's outside the project directory or if no cwd is provided.
+ */
+export function toDisplayPath(filePath: string, cwd?: string): string {
+  if (!cwd) return filePath;
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedFile = path.resolve(filePath);
+  if (resolvedFile.startsWith(resolvedCwd + path.sep) || resolvedFile === resolvedCwd) {
+    return path.relative(resolvedCwd, resolvedFile);
+  }
+  return filePath;
+}
+
 export function toolInfoFromToolUse(
   toolUse: any,
   supportsTerminalOutput: boolean = false,
+  cwd?: string,
 ): ToolInfo {
   const name = toolUse.name;
 
   switch (name) {
+    case "Agent":
     case "Task": {
       const input = toolUse.input as AgentInput | BashInput;
       return {
@@ -153,8 +170,9 @@ export function toolInfoFromToolUse(
       } else if (input.offset) {
         limit = " (from line " + input.offset + ")";
       }
+      const displayPath = input.file_path ? toDisplayPath(input.file_path, cwd) : "File";
       return {
-        title: "Read " + (input.file_path ?? "File") + limit,
+        title: "Read " + displayPath + limit,
         kind: "read",
         locations: input.file_path
           ? [
@@ -188,8 +206,9 @@ export function toolInfoFromToolUse(
           },
         ];
       }
+      const displayPath = input?.file_path ? toDisplayPath(input.file_path, cwd) : undefined;
       return {
-        title: input?.file_path ? `Write ${input.file_path}` : "Write",
+        title: displayPath ? `Write ${displayPath}` : "Write",
         kind: "edit",
         content,
         locations: input?.file_path ? [{ path: input.file_path }] : [],
@@ -209,8 +228,9 @@ export function toolInfoFromToolUse(
           },
         ];
       }
+      const displayPath = input?.file_path ? toDisplayPath(input.file_path, cwd) : undefined;
       return {
-        title: input?.file_path ? `Edit ${input.file_path}` : "Edit",
+        title: displayPath ? `Edit ${displayPath}` : "Edit",
         kind: "edit",
         content,
         locations: input?.file_path ? [{ path: input.file_path }] : [],

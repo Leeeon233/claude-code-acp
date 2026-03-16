@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.21.0
+
+- Update to claude-agent-sdk 0.2.71
+- show project-relative paths in tool call titles
+- Lib: pass through tools array to control built-in tool availability
+- fix: skip user replay
+- fix: handle renamed Agent tool in toolInfoFromToolUse
+
+## 0.20.2
+
+- Update to @anthropic-ai/claude-agent-sdk@0.2.68
+
+## 0.20.1
+
+- fix: inherit process.env when spawning agent subprocess
+
+## 0.20.0
+
+- Update to @anthropic-ai/claude-agent-sdk@0.2.63
+- Respect user settings for permission mode and model selection
+- Better handling of concurrent prompts
+- Support --cli for node as well
+- Propagate max_tokens stop reason instead of throwing internal error
+- fix: throw resourceNotFound when loadSession fails to resume
+- fix: add missing zod dependency
+- Surface better error message when Claude Code process exits unexpectedly
+
 ## 0.19.2
 
 - Fix for broken notifications when reloading session messages

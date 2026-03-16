@@ -1,6 +1,6 @@
 {
   "name": "acp-extension-claude",
-  "version": "0.19.4",
+  "version": "0.21.0",
   "description": "Forked ACP-compatible coding agent with improved timeout handling and logging",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
@@ -50,19 +50,20 @@
   "license": "Apache-2.0",
   "dependencies": {
     "acp-extension-core": "workspace:*",
-    "@agentclientprotocol/sdk": "0.14.1",
-    "@anthropic-ai/claude-agent-sdk": "0.2.62",
-    "zod": "^4.3.6"
+    "@agentclientprotocol/sdk": "0.16.1",
+    "@anthropic-ai/claude-agent-sdk": "0.2.71",
+    "zod": "^3.25.0 || ^4.0.0"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.71",
     "@anthropic-ai/sdk": "0.78.0",
     "@eslint/js": "10.0.1",
-    "@types/node": "25.3.2",
+    "@types/node": "25.3.5",
     "@typescript-eslint/eslint-plugin": "8.56.1",
     "@typescript-eslint/parser": "8.56.1",
-    "eslint": "10.0.2",
+    "eslint": "10.0.3",
     "eslint-config-prettier": "10.1.8",
-    "globals": "17.3.0",
+    "globals": "17.4.0",
     "prettier": "3.8.1",
     "ts-node": "10.9.2",
     "typescript": "5.9.3",
