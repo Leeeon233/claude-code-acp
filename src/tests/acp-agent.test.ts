@@ -70,7 +70,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
 
     constructor(agent: Agent) {
       this.agent = agent;
-      this.resolveAvailableCommands = () => {};
+      this.resolveAvailableCommands = () => { };
       this.availableCommandsPromise = new Promise((resolve) => {
         this.resolveAvailableCommands = resolve;
       });
@@ -1269,9 +1269,10 @@ describe("permission requests", () => {
 describe("stop reason propagation", () => {
   function createMockAgent() {
     const mockClient = {
-      sessionUpdate: async () => {},
+      sessionUpdate: async () => { },
+      extMethod: async () => { },
     } as unknown as AgentSideConnection;
-    return new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+    return new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
   }
 
   function createResultMessage(overrides: {
@@ -1508,13 +1509,13 @@ describe("stop reason propagation", () => {
 describe("session/close", () => {
   function createMockAgent() {
     const mockClient = {
-      sessionUpdate: async () => {},
+      sessionUpdate: async () => { },
     } as unknown as AgentSideConnection;
-    return new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+    return new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
   }
 
   function injectSession(agent: ClaudeAcpAgent, sessionId: string) {
-    function* empty() {}
+    function* empty() { }
     const gen = Object.assign(empty(), { interrupt: vi.fn() });
     agent.sessions[sessionId] = {
       query: gen as any,

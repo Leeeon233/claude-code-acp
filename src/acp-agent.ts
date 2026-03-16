@@ -74,6 +74,8 @@ import {
   toolUpdateFromToolResult,
 } from "./tools.js";
 import { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
+import { EXT_METHOD_NAME, ModelUsage, SessionUsageUpdate } from "acp-extension-core";
+import { getUsage } from "./usage.js";
 
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
