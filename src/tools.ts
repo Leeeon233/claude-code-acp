@@ -1,4 +1,3 @@
-import path from "node:path";
 import {
   ContentBlock,
   PlanEntry,
@@ -6,6 +5,19 @@ import {
   ToolCallLocation,
   ToolKind,
 } from "@agentclientprotocol/sdk";
+import { HookCallback } from "@anthropic-ai/claude-agent-sdk";
+import {
+  AgentInput,
+  BashInput,
+  FileEditInput,
+  FileReadInput,
+  FileWriteInput,
+  GlobInput,
+  GrepInput,
+  TodoWriteInput,
+  WebFetchInput,
+  WebSearchInput,
+} from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
 import {
   ImageBlockParam,
   TextBlockParam,
@@ -15,29 +27,31 @@ import {
   WebSearchToolResultError,
 } from "@anthropic-ai/sdk/resources";
 import {
-  BetaBashCodeExecutionToolResultBlockParam,
   BetaBashCodeExecutionResultBlock,
+  BetaBashCodeExecutionToolResultBlockParam,
   BetaBashCodeExecutionToolResultError,
-  BetaCodeExecutionToolResultBlockParam,
   BetaCodeExecutionResultBlock,
+  BetaCodeExecutionToolResultBlockParam,
   BetaCodeExecutionToolResultError,
+  BetaImageBlockParam,
   BetaRequestMCPToolResultBlockParam,
-  BetaTextEditorCodeExecutionToolResultBlockParam,
-  BetaTextEditorCodeExecutionViewResultBlock,
   BetaTextEditorCodeExecutionCreateResultBlock,
   BetaTextEditorCodeExecutionStrReplaceResultBlock,
+  BetaTextEditorCodeExecutionToolResultBlockParam,
   BetaTextEditorCodeExecutionToolResultError,
+  BetaTextEditorCodeExecutionViewResultBlock,
+  BetaToolReferenceBlock,
   BetaToolResultBlockParam,
   BetaToolSearchToolResultBlockParam,
-  BetaToolReferenceBlock,
-  BetaToolSearchToolSearchResultBlock,
   BetaToolSearchToolResultError,
-  BetaWebFetchToolResultBlockParam,
+  BetaToolSearchToolSearchResultBlock,
   BetaWebFetchBlock,
+  BetaWebFetchToolResultBlockParam,
   BetaWebFetchToolResultErrorBlock,
   BetaWebSearchToolResultBlockParam,
-  BetaImageBlockParam,
 } from "@anthropic-ai/sdk/resources/beta.mjs";
+import path from "node:path";
+import { Logger } from "./acp-agent.js";
 
 /**
  * Union of all possible content types that can appear in tool results from the Anthropic SDK.
@@ -62,20 +76,6 @@ type ToolResultContent =
   | BetaTextEditorCodeExecutionCreateResultBlock
   | BetaTextEditorCodeExecutionStrReplaceResultBlock
   | BetaTextEditorCodeExecutionToolResultError;
-import { HookCallback } from "@anthropic-ai/claude-agent-sdk";
-import { Logger } from "./acp-agent.js";
-import {
-  AgentInput,
-  BashInput,
-  FileEditInput,
-  FileReadInput,
-  FileWriteInput,
-  GlobInput,
-  GrepInput,
-  TodoWriteInput,
-  WebFetchInput,
-  WebSearchInput,
-} from "@anthropic-ai/claude-code/sdk-tools.js";
 
 interface ToolInfo {
   title: string;
@@ -368,10 +368,13 @@ export function toolInfoFromToolUse(
     }
 
     case "ExitPlanMode": {
+      const planInput = toolUse.input as { plan?: string };
       return {
         title: "Ready to code?",
         kind: "switch_mode",
-        content: [],
+        content: planInput?.plan
+          ? [{ type: "content" as const, content: { type: "text" as const, text: planInput.plan } }]
+          : [],
       };
     }
 
@@ -481,7 +484,7 @@ export function toolUpdateFromToolResult(
         result.type === "bash_code_execution_result"
       ) {
         const bashResult = result as BetaBashCodeExecutionResultBlock;
-        output = bashResult.stdout || bashResult.stderr || "";
+        output = [bashResult.stdout, bashResult.stderr].filter(Boolean).join("\n");
         exitCode = bashResult.return_code;
       } else if (typeof result === "string") {
         output = result;
