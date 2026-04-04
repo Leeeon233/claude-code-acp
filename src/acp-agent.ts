@@ -76,7 +76,7 @@ import {
   toolUpdateFromToolResult,
 } from "./tools.js";
 import { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
-import { EXT_METHOD_NAME, ModelUsage, SessionUsageUpdate } from "acp-extension-core";
+import { EXT_METHOD_NAME, ModelUsage as ModelUsageExt, SessionUsageUpdate } from "acp-extension-core";
 import { getUsage } from "./usage.js";
 
 export const CLAUDE_CONFIG_DIR =
@@ -646,7 +646,7 @@ export class ClaudeAcpAgent implements Agent {
               break;
             }
             // =====================
-            const modelUsage: Record<string, ModelUsage> = {}
+            const modelUsage: Record<string, ModelUsageExt> = {}
             let contextWindow = 0;
             for (const [model, usage] of Object.entries(message.modelUsage)) {
               modelUsage[model] = {
@@ -656,7 +656,7 @@ export class ClaudeAcpAgent implements Agent {
                 cacheCreationInputTokens: usage.cacheCreationInputTokens,
                 webSearchRequests: usage.webSearchRequests,
                 costUSD: usage.costUSD
-              } as ModelUsage
+              } as ModelUsageExt
               contextWindow = Math.max(contextWindow, usage.contextWindow);
             }
             const usages: SessionUsageUpdate = {
