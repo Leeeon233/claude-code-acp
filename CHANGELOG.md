@@ -1,5 +1,95 @@
 # Changelog
 
+## [0.30.0](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.29.2...v0.30.0) (2026-04-20)
+
+
+### Features
+
+* Update to claude-agent-sdk 0.2.114 ([#572](https://github.com/agentclientprotocol/claude-agent-acp/issues/572)) ([e9dd452](https://github.com/agentclientprotocol/claude-agent-acp/commit/e9dd45207d396302f20de82561135bf9558c0e76))
+
+## [0.29.2](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.29.1...v0.29.2) (2026-04-17)
+
+
+### Bug Fixes
+
+* Guard against null usage tokens ([#565](https://github.com/agentclientprotocol/claude-agent-acp/issues/565)) ([f7dc300](https://github.com/agentclientprotocol/claude-agent-acp/commit/f7dc300a165e70f6426f53920f12e24c04033cdc)), closes [#564](https://github.com/agentclientprotocol/claude-agent-acp/issues/564)
+
+## [0.29.1](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.29.0...v0.29.1) (2026-04-17)
+
+
+### Bug Fixes
+
+* emit usage updates from Claude stream events ([#506](https://github.com/agentclientprotocol/claude-agent-acp/issues/506)) ([dd67450](https://github.com/agentclientprotocol/claude-agent-acp/commit/dd67450fd9bddc82db3e71273b535e07b2672804))
+* Remove dot from auto mode description ([#561](https://github.com/agentclientprotocol/claude-agent-acp/issues/561)) ([2ecfa83](https://github.com/agentclientprotocol/claude-agent-acp/commit/2ecfa83b26db58deaded210463fa6ff21d0dff70))
+* Update to claude-agent-sdk 0.2.112 to fix Auto bug with Opus 4.7 ([#562](https://github.com/agentclientprotocol/claude-agent-acp/issues/562)) ([079614a](https://github.com/agentclientprotocol/claude-agent-acp/commit/079614ab05afba17e2cce0d3d238df7b90e17389))
+
+## [0.29.0](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.28.0...v0.29.0) (2026-04-16)
+
+
+### Features
+
+* Update to claude-agent-sdk 0.2.111 (Opus 4.7) ([#557](https://github.com/agentclientprotocol/claude-agent-acp/issues/557)) ([85cd70c](https://github.com/agentclientprotocol/claude-agent-acp/commit/85cd70c9f3be47c9c404958547c4046d866db1c9))
+
+## [0.28.0](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.27.0...v0.28.0) (2026-04-15)
+
+
+### Features
+
+* Update to claude-agent-sdk 0.2.109 ([#549](https://github.com/agentclientprotocol/claude-agent-acp/issues/549)) ([07a0fbc](https://github.com/agentclientprotocol/claude-agent-acp/commit/07a0fbc2f6bc388541d064a436412bdd850772cb))
+
+## [0.27.0](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.26.0...v0.27.0) (2026-04-13)
+
+
+### Features
+
+* allow clients to opt into receiving raw SDK messages ([#527](https://github.com/agentclientprotocol/claude-agent-acp/issues/527)) ([403a668](https://github.com/agentclientprotocol/claude-agent-acp/commit/403a668078c067868062ed26cd4d3e36665b66b6))
+* Update to claude-agent-sdk 0.2.104 ([#537](https://github.com/agentclientprotocol/claude-agent-acp/issues/537)) ([6811943](https://github.com/agentclientprotocol/claude-agent-acp/commit/6811943f57ef08616be633a8197223d4072663cf))
+
+
+### Bug Fixes
+
+* Allow auto mode after plan mode and send description for auto mode ([#528](https://github.com/agentclientprotocol/claude-agent-acp/issues/528)) ([fb9aced](https://github.com/agentclientprotocol/claude-agent-acp/commit/fb9aced3151c40694f1f01fd95665c4f5d90eb67))
+* Better remote check for auth methods ([#538](https://github.com/agentclientprotocol/claude-agent-acp/issues/538)) ([93f58c0](https://github.com/agentclientprotocol/claude-agent-acp/commit/93f58c0d2fcf7365c7ca5a6e52f56663e2065ddb))
+* better shutdown logic ([#543](https://github.com/agentclientprotocol/claude-agent-acp/issues/543)) ([9fb631f](https://github.com/agentclientprotocol/claude-agent-acp/commit/9fb631f5d76a5c5f6f0a1b61bdef05fe368c754c))
+* exit process when ACP connection closes ([#530](https://github.com/agentclientprotocol/claude-agent-acp/issues/530)) ([5c81e99](https://github.com/agentclientprotocol/claude-agent-acp/commit/5c81e99fe5ccdf774819b7ff3a2bc78a6519d730))
+* guard tool info rendering when tool_use input is undefined ([#536](https://github.com/agentclientprotocol/claude-agent-acp/issues/536)) ([d627b8c](https://github.com/agentclientprotocol/claude-agent-acp/commit/d627b8c5e95be31ac03923ef67d91748ec8564c5))
+* Remove backup auth check from new session ([#544](https://github.com/agentclientprotocol/claude-agent-acp/issues/544)) ([32b16c1](https://github.com/agentclientprotocol/claude-agent-acp/commit/32b16c1ad99394238b0e5cd6c2f761c12debe142))
+
+## [0.26.0](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.25.3...v0.26.0) (2026-04-08)
+
+
+### Features
+
+* Update claude-agent-sdk to 0.2.96 ([#526](https://github.com/agentclientprotocol/claude-agent-acp/issues/526)) ([c073131](https://github.com/agentclientprotocol/claude-agent-acp/commit/c07313148808a55f27f385c10babbaf7511a7f12))
+
+
+### Bug Fixes
+
+* Remove bun builds from release ([#525](https://github.com/agentclientprotocol/claude-agent-acp/issues/525)) ([fcf5aaf](https://github.com/agentclientprotocol/claude-agent-acp/commit/fcf5aaf06dfe9f7d1b285b976eeb2d1e20ea8dec))
+* Use TUI login for remote environments ([#523](https://github.com/agentclientprotocol/claude-agent-acp/issues/523)) ([cc73e37](https://github.com/agentclientprotocol/claude-agent-acp/commit/cc73e37b41678aa67813c4fbef66ba33ca538743))
+
+## [0.25.3](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.25.2...v0.25.3) (2026-04-06)
+
+
+### Bug Fixes
+
+* Drop claude-agent-sdk back to 0.2.91 to fix broken import ([#513](https://github.com/agentclientprotocol/claude-agent-acp/issues/513)) ([26f3e8a](https://github.com/agentclientprotocol/claude-agent-acp/commit/26f3e8a5216295985fadb80fb3b977045c0c1b2c))
+* Recreate resumed sessions when params change ([#515](https://github.com/agentclientprotocol/claude-agent-acp/issues/515)) ([aa82193](https://github.com/agentclientprotocol/claude-agent-acp/commit/aa82193330026bae132fed8391c47dde777dcf5a))
+
+## [0.25.2](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.25.1...v0.25.2) (2026-04-06)
+
+
+### Bug Fixes
+
+* prioritize ANTHROPIC_MODEL env var over settings.model in model … ([#505](https://github.com/agentclientprotocol/claude-agent-acp/issues/505)) ([bea1a40](https://github.com/agentclientprotocol/claude-agent-acp/commit/bea1a40e9bfe1e06672b118a727f9339def3be23))
+
+## [0.25.1](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.25.0...v0.25.1) (2026-04-06)
+
+
+### Bug Fixes
+
+* add `auto` to valid modes in applySessionMode to fix mode cycling ([#507](https://github.com/agentclientprotocol/claude-agent-acp/issues/507)) ([15e91fb](https://github.com/agentclientprotocol/claude-agent-acp/commit/15e91fb5c3449de2600b583cb7a8d36b5b510443))
+
 ## [0.25.0](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.24.2...v0.25.0) (2026-04-03)
 
 

@@ -214,8 +214,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
     const commands = await client.availableCommandsPromise;
 
     expect(commands).toContainEqual({
-      description:
-        "Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]",
+      description: "Free up context by summarizing the conversation so far",
       input: {
         hint: "<optional custom summarization instructions>",
       },
@@ -1173,7 +1172,7 @@ describe("prompt conversion", () => {
 describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK behavior", () => {
   it("finds vendored cli path", async () => {
     const path = await claudeCliPath();
-    expect(path).toContain("@anthropic-ai/claude-agent-sdk/cli.js");
+    expect(path).toMatch(/@anthropic-ai\/claude-agent-sdk-[^/]+\/claude(\.exe)?$/);
   });
 
   it("query has a 'default' model", async () => {
@@ -1329,6 +1328,7 @@ describe("stop reason propagation", () => {
       input,
       cancelled: false,
       cwd: "/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/test", mcpServers: [] }),
       modes: {
         currentModeId: "default",
         availableModes: [],
@@ -1337,6 +1337,7 @@ describe("stop reason propagation", () => {
         currentModelId: "default",
         availableModels: [],
       },
+      modelInfos: [],
       settingsManager: { dispose: vi.fn() } as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1349,6 +1350,8 @@ describe("stop reason propagation", () => {
       pendingMessages: new Map(),
       nextPendingOrder: 0,
       abortController: new AbortController(),
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
     };
   }
 
@@ -1467,6 +1470,7 @@ describe("stop reason propagation", () => {
       query: messageGenerator() as any,
       input,
       cwd: "/tmp/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/tmp/test", mcpServers: [] }),
       cancelled: false,
       modes: {
         currentModeId: "default",
@@ -1476,6 +1480,7 @@ describe("stop reason propagation", () => {
         currentModelId: "default",
         availableModels: [],
       },
+      modelInfos: [],
       settingsManager: { dispose: vi.fn() } as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1488,6 +1493,8 @@ describe("stop reason propagation", () => {
       promptRunning: false,
       pendingMessages: new Map(),
       nextPendingOrder: 0,
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
     };
 
     const response = await agent.prompt({
@@ -1535,12 +1542,13 @@ describe("session/close", () => {
 
   function injectSession(agent: ClaudeAcpAgent, sessionId: string) {
     function* empty() { }
-    const gen = Object.assign(empty(), { interrupt: vi.fn() });
+    const gen = Object.assign(empty(), { interrupt: vi.fn(), close: vi.fn() });
     agent.sessions[sessionId] = {
       query: gen as any,
       input: new Pushable(),
       cancelled: false,
       cwd: "/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/test", mcpServers: [] }),
       modes: {
         currentModeId: "default",
         availableModes: [],
@@ -1549,6 +1557,7 @@ describe("session/close", () => {
         currentModelId: "default",
         availableModels: [],
       },
+      modelInfos: [],
       settingsManager: { dispose: vi.fn() } as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1561,6 +1570,8 @@ describe("session/close", () => {
       pendingMessages: new Map(),
       nextPendingOrder: 0,
       abortController: new AbortController(),
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
     };
     return agent.sessions[sessionId]!;
   }
@@ -1607,6 +1618,145 @@ describe("session/close", () => {
 
     expect(agent.sessions["session-a"]).toBeUndefined();
     expect(agent.sessions["session-b"]).toBeDefined();
+  });
+});
+
+describe("getOrCreateSession param change detection", () => {
+  function createMockAgent() {
+    const mockClient = {
+      sessionUpdate: async () => { },
+    } as unknown as AgentSideConnection;
+    return new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
+  }
+
+  function injectSession(
+    agent: ClaudeAcpAgent,
+    sessionId: string,
+    opts: { cwd?: string; mcpServers?: { name: string }[] } = {},
+  ) {
+    const cwd = opts.cwd ?? "/test";
+    const mcpServers = (opts.mcpServers ?? []) as any[];
+    function* empty() { }
+    const gen = Object.assign(empty(), {
+      interrupt: vi.fn(),
+      close: vi.fn(),
+      supportedCommands: vi.fn().mockResolvedValue([]),
+    });
+    agent.sessions[sessionId] = {
+      query: gen as any,
+      input: new Pushable(),
+      cancelled: false,
+      cwd,
+      sessionFingerprint: JSON.stringify({
+        cwd,
+        mcpServers: [...mcpServers].sort((a: any, b: any) => a.name.localeCompare(b.name)),
+      }),
+      modes: { currentModeId: "default", availableModes: [] },
+      models: { currentModelId: "default", availableModels: [] },
+      modelInfos: [],
+      settingsManager: { dispose: vi.fn() } as any,
+      accumulatedUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedReadTokens: 0,
+        cachedWriteTokens: 0,
+      },
+      configOptions: [],
+      promptRunning: false,
+      pendingMessages: new Map(),
+      nextPendingOrder: 0,
+      abortController: new AbortController(),
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
+    };
+    return agent.sessions[sessionId]!;
+  }
+
+  it("returns cached session when params are unchanged", async () => {
+    const agent = createMockAgent();
+    const session = injectSession(agent, "s1", { cwd: "/project" });
+
+    await agent.unstable_resumeSession({
+      sessionId: "s1",
+      cwd: "/project",
+      mcpServers: [],
+    });
+
+    // Session object should be the exact same reference (not recreated)
+    expect(agent.sessions["s1"]).toBe(session);
+    expect(session.settingsManager.dispose).not.toHaveBeenCalled();
+  });
+
+  it("tears down existing session when cwd changes", async () => {
+    const agent = createMockAgent();
+    const session = injectSession(agent, "s1", { cwd: "/old" });
+
+    // Mock createSession to avoid spawning a real process.
+    // It will throw, but we can catch that — we only need to verify
+    // the old session was torn down before createSession was attempted.
+    const createSessionSpy = vi
+      .spyOn(agent as any, "createSession")
+      .mockRejectedValue(new Error("mock"));
+
+    await expect(
+      agent.unstable_resumeSession({ sessionId: "s1", cwd: "/new", mcpServers: [] }),
+    ).rejects.toThrow("mock");
+
+    // Old session should have been fully torn down
+    expect(session.settingsManager.dispose).toHaveBeenCalled();
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(session.query.interrupt).toHaveBeenCalled();
+    expect(agent.sessions["s1"]).toBeUndefined();
+
+    // createSession should have been called with the new cwd
+    expect(createSessionSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/new" }),
+      expect.objectContaining({ resume: "s1" }),
+    );
+  });
+
+  it("tears down existing session when mcpServers change", async () => {
+    const agent = createMockAgent();
+    const session = injectSession(agent, "s1", { cwd: "/project" });
+
+    const createSessionSpy = vi
+      .spyOn(agent as any, "createSession")
+      .mockRejectedValue(new Error("mock"));
+
+    await expect(
+      agent.unstable_resumeSession({
+        sessionId: "s1",
+        cwd: "/project",
+        mcpServers: [{ name: "new-server", command: "node", args: ["server.js"], env: [] }],
+      }),
+    ).rejects.toThrow("mock");
+
+    expect(session.settingsManager.dispose).toHaveBeenCalled();
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(agent.sessions["s1"]).toBeUndefined();
+    expect(createSessionSpy).toHaveBeenCalled();
+  });
+
+  it("treats mcpServers in different order as unchanged", async () => {
+    const agent = createMockAgent();
+    const servers = [
+      { name: "b-server", command: "node", args: ["b.js"], env: [] },
+      { name: "a-server", command: "node", args: ["a.js"], env: [] },
+    ] as const;
+    const session = injectSession(agent, "s1", {
+      cwd: "/project",
+      mcpServers: servers as any,
+    });
+
+    // Same servers but reversed order — should NOT trigger teardown
+    await agent.unstable_resumeSession({
+      sessionId: "s1",
+      cwd: "/project",
+      mcpServers: [...servers].reverse() as any,
+    });
+
+    expect(agent.sessions["s1"]).toBe(session);
+    expect(session.settingsManager.dispose).not.toHaveBeenCalled();
   });
 });
 
@@ -1677,6 +1827,23 @@ describe("usage_update computation", () => {
     };
   }
 
+  function createStreamEvent(
+    eventType: "message_start" | "message_delta",
+    payload: Record<string, unknown>,
+    parentToolUseId: string | null = null,
+  ) {
+    return {
+      type: "stream_event" as const,
+      parent_tool_use_id: parentToolUseId,
+      uuid: randomUUID(),
+      session_id: "test-session",
+      event:
+        eventType === "message_start"
+          ? { type: "message_start" as const, message: payload }
+          : { type: "message_delta" as const, ...payload },
+    };
+  }
+
   function createMockAgentWithCapture() {
     const updates: any[] = [];
     const mockClient = {
@@ -1684,7 +1851,7 @@ describe("usage_update computation", () => {
         updates.push(notification);
       },
     } as unknown as AgentSideConnection;
-    const agent = new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+    const agent = new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
     return { agent, updates };
   }
 
@@ -1711,6 +1878,7 @@ describe("usage_update computation", () => {
       input,
       cancelled: false,
       cwd: "/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/test", mcpServers: [] }),
       modes: {
         currentModeId: "default",
         availableModes: [],
@@ -1719,6 +1887,7 @@ describe("usage_update computation", () => {
         currentModelId: "default",
         availableModels: [],
       },
+      modelInfos: [],
       settingsManager: {} as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1731,6 +1900,8 @@ describe("usage_update computation", () => {
       pendingMessages: new Map(),
       nextPendingOrder: 0,
       abortController: new AbortController(),
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
     };
   }
 
@@ -1769,6 +1940,513 @@ describe("usage_update computation", () => {
     expect(usageUpdate).toBeDefined();
     // used = input(1000) + output(500) + cache_read(200) + cache_creation(100) = 1800
     expect(usageUpdate.update.used).toBe(1800);
+  });
+
+  it("coerces null input/output tokens so wire `used` is never null", async () => {
+    // Synthetic or third-party-backend stream events have been observed
+    // emitting input_tokens/output_tokens as null. Without coercion the
+    // snapshot leaks NaN into totalTokens(), and JSON.stringify(NaN) === "null"
+    // produces a malformed `used: null` that schema-validating ACP clients reject.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createAssistantMessage({
+        model: "claude-opus-4-20250514",
+        usage: {
+          input_tokens: null,
+          output_tokens: null,
+          cache_read_input_tokens: 200,
+          cache_creation_input_tokens: 100,
+        } as unknown as {
+          input_tokens: number;
+          output_tokens: number;
+          cache_read_input_tokens: number;
+          cache_creation_input_tokens: number;
+        },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 200,
+            cacheCreationInputTokens: 100,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates.length).toBeGreaterThan(0);
+    for (const u of usageUpdates) {
+      expect(u.update.used).not.toBeNull();
+      expect(Number.isFinite(u.update.used)).toBe(true);
+      // Round-trip through JSON to catch the NaN -> "null" serialization bug.
+      const wire = JSON.parse(JSON.stringify(u.update));
+      expect(wire.used).not.toBeNull();
+      expect(typeof wire.used).toBe("number");
+    }
+  });
+
+  it("stream_event message_start emits usage_update before result", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-20250514",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 500,
+          cache_read_input_tokens: 200,
+          cache_creation_input_tokens: 100,
+        },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadInputTokens: 200,
+            cacheCreationInputTokens: 100,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(2);
+    expect(usageUpdates[0].update.used).toBe(1800);
+    // First prompt of a session has no prior result to learn the window from,
+    // so the mid-stream update falls back to the default context window.
+    expect(usageUpdates[0].update.size).toBe(200000);
+    expect(usageUpdates[0].update.cost).toBeUndefined();
+    expect(usageUpdates[1].update.used).toBe(1800);
+    expect(usageUpdates[1].update.size).toBe(1000000);
+    expect(usageUpdates[1].update.cost).toBeDefined();
+  });
+
+  it("stream_event message_delta patches previous snapshot", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-20250514",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 0,
+          cache_read_input_tokens: 200,
+          cache_creation_input_tokens: 100,
+        },
+      }),
+      createStreamEvent("message_delta", {
+        usage: { output_tokens: 500 },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadInputTokens: 200,
+            cacheCreationInputTokens: 100,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(3);
+    expect(usageUpdates[0].update.used).toBe(1300);
+    expect(usageUpdates[0].update.cost).toBeUndefined();
+    expect(usageUpdates[1].update.used).toBe(1800);
+    expect(usageUpdates[1].update.cost).toBeUndefined();
+    expect(usageUpdates[2].update.used).toBe(1800);
+    expect(usageUpdates[2].update.cost).toBeDefined();
+  });
+
+  it("mid-stream size is inferred from a 1M model name before the first result", async () => {
+    // On the very first prompt there is no learned context window yet, so the
+    // mid-stream update would otherwise fall back to 200k. A "-1m" suffix in
+    // the SDK model ID is enough signal to emit 1_000_000 up front.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-6-1m",
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 1000,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-6-1m": {
+            inputTokens: 2000,
+            outputTokens: 1000,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.02,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(2);
+    expect(usageUpdates[0].update.size).toBe(1000000);
+    expect(usageUpdates[1].update.size).toBe(1000000);
+  });
+
+  it("duplicate stream_event totals do not re-emit usage_update", async () => {
+    // A message_delta whose cumulative totals match the prior snapshot should
+    // not trigger a duplicate usage_update — only the result adds cost on top.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-20250514",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 500,
+          cache_read_input_tokens: 200,
+          cache_creation_input_tokens: 100,
+        },
+      }),
+      createStreamEvent("message_delta", {
+        usage: { output_tokens: 500 },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadInputTokens: 200,
+            cacheCreationInputTokens: 100,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(2);
+    expect(usageUpdates[0].update.used).toBe(1800);
+    expect(usageUpdates[0].update.cost).toBeUndefined();
+    expect(usageUpdates[1].update.used).toBe(1800);
+    expect(usageUpdates[1].update.cost).toBeDefined();
+  });
+
+  it("mid-stream size uses the session's learned context window", async () => {
+    // Session state persists the model's context window across prompts, so a
+    // mid-stream update in a later prompt reports the real size immediately
+    // instead of snapping back to the 200k default before the result arrives.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-20250514",
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 1000,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 2000,
+            outputTokens: 1000,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.02,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+    // Simulate a prior prompt having learned the 1M window for this model.
+    agent.sessions["test-session"].contextWindowSize = 1000000;
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(2);
+    expect(usageUpdates[0].update.size).toBe(1000000);
+    expect(usageUpdates[1].update.size).toBe(1000000);
+  });
+
+  it("switching to a 1M model seeds the context window from the heuristic", async () => {
+    // The heuristic runs at config-change time so mid-stream updates in the
+    // next prompt already report 1M — without waiting for message_start or
+    // the next `result` to correct us.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-6-1m",
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 1000,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-6-1m": {
+            inputTokens: 2000,
+            outputTokens: 1000,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.02,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+    const session = agent.sessions["test-session"];
+    expect(session.contextWindowSize).toBe(200000);
+
+    await (agent as any).applyConfigOptionValue(session, "model", "claude-opus-4-6-1m");
+    expect(session.contextWindowSize).toBe(1000000);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(2);
+    expect(usageUpdates[0].update.size).toBe(1000000);
+    expect(usageUpdates[1].update.size).toBe(1000000);
+  });
+
+  it("result with no matching modelUsage preserves the learned window", async () => {
+    // A turn whose `result.modelUsage` doesn't contain the current top-level
+    // model (e.g. no top-level assistant message, or only a subagent ran) must
+    // not clobber the window learned on a prior turn — otherwise the next
+    // prompt's mid-stream updates regress to the 200k default.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-haiku-4-5-20251001": {
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.001,
+            contextWindow: 200000,
+            maxOutputTokens: 8192,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+    const session = agent.sessions["test-session"];
+    session.contextWindowSize = 1000000;
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    expect(session.contextWindowSize).toBe(1000000);
+    // The emit itself falls back to session.contextWindowSize, which is
+    // unchanged from the learned value.
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    // No lastAssistantTotalUsage was set (no top-level assistant / stream
+    // event), so the result branch skips its emit entirely.
+    expect(usageUpdates).toHaveLength(0);
+  });
+
+  it("switching the session's model invalidates the learned context window", async () => {
+    // When the user switches models mid-session, the window learned for the
+    // previous model would otherwise persist into the next prompt's first
+    // mid-stream update. applyConfigOptionValue should reset it so the next
+    // turn's first update falls back to the heuristic (here: 200k default).
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-sonnet-4-6",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 500,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-sonnet-4-6": {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 200000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+    const session = agent.sessions["test-session"];
+    session.contextWindowSize = 1000000;
+    session.models = { ...session.models, currentModelId: "claude-opus-4-6-1m" };
+
+    // User flips the selector to a 200k model.
+    await (agent as any).applyConfigOptionValue(session, "model", "claude-sonnet-4-6");
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(2);
+    expect(usageUpdates[0].update.size).toBe(200000);
+    expect(usageUpdates[1].update.size).toBe(200000);
+  });
+
+  it("non-usage stream events do not re-emit usage_update", async () => {
+    // content_block_* and message_stop carry no usage fields; they must not
+    // trigger duplicate emits between the real message_start / message_delta
+    // / result updates.
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-opus-4-20250514",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+      {
+        type: "stream_event" as const,
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: "test-session",
+        event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      },
+      {
+        type: "stream_event" as const,
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: "test-session",
+        event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      },
+      {
+        type: "stream_event" as const,
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: "test-session",
+        event: { type: "content_block_stop", index: 0 },
+      },
+      createStreamEvent("message_delta", {
+        usage: { output_tokens: 200 },
+      }),
+      {
+        type: "stream_event" as const,
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: "test-session",
+        event: { type: "message_stop" },
+      },
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 1000,
+            outputTokens: 200,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    // Exactly three: message_start (1000), message_delta (1200), result (1200 + cost).
+    expect(usageUpdates).toHaveLength(3);
+    expect(usageUpdates[0].update.used).toBe(1000);
+    expect(usageUpdates[1].update.used).toBe(1200);
+    expect(usageUpdates[2].update.used).toBe(1200);
+    expect(usageUpdates[2].update.cost).toBeDefined();
+  });
+
+  it("subagent stream_event does not emit usage_update", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent(
+        "message_start",
+        {
+          model: "claude-haiku-4-5-20251001",
+          usage: {
+            input_tokens: 500,
+            output_tokens: 100,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+        "tool_use_123",
+      ),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-haiku-4-5-20251001": {
+            inputTokens: 500,
+            outputTokens: 100,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.001,
+            contextWindow: 200000,
+            maxOutputTokens: 8192,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(0);
   });
 
   it("size reflects the current model's context window, not min across all", async () => {
@@ -2050,5 +2728,203 @@ describe("usage_update computation", () => {
     expect(usageUpdate).toBeDefined();
     // size should be 1000000 (Opus), not 200000 (the fallback if <synthetic> overrode the model)
     expect(usageUpdate.update.size).toBe(1000000);
+  });
+});
+
+describe("emitRawSDKMessages", () => {
+  function createMockAgentWithExtNotification() {
+    const updates: any[] = [];
+    const extNotifications: { method: string; params: any }[] = [];
+    const mockClient = {
+      sessionUpdate: async (notification: any) => {
+        updates.push(notification);
+      },
+      extNotification: async (method: string, params: any) => {
+        extNotifications.push({ method, params });
+      },
+    } as unknown as AgentSideConnection;
+    const agent = new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
+    return { agent, updates, extNotifications };
+  }
+
+  function injectSession(
+    agent: ClaudeAcpAgent,
+    messages: any[],
+    emitRawSDKMessages: boolean | { type: string; subtype?: string }[],
+  ) {
+    const input = new Pushable<any>();
+    async function* messageGenerator() {
+      const iter = input[Symbol.asyncIterator]();
+      const { value: userMessage, done } = await iter.next();
+      if (!done && userMessage) {
+        yield {
+          type: "user",
+          message: userMessage.message,
+          parent_tool_use_id: null,
+          uuid: userMessage.uuid,
+          session_id: "test-session",
+          isReplay: true,
+        };
+      }
+      yield* messages;
+    }
+    agent.sessions["test-session"] = {
+      query: messageGenerator() as any,
+      input,
+      cancelled: false,
+      cwd: "/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/test", mcpServers: [] }),
+      modes: { currentModeId: "default", availableModes: [] },
+      models: { currentModelId: "default", availableModels: [] },
+      modelInfos: [],
+      settingsManager: { dispose: vi.fn() } as any,
+      accumulatedUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedReadTokens: 0,
+        cachedWriteTokens: 0,
+      },
+      configOptions: [],
+      promptRunning: false,
+      pendingMessages: new Map(),
+      nextPendingOrder: 0,
+      abortController: new AbortController(),
+      emitRawSDKMessages,
+      contextWindowSize: 200000,
+    };
+  }
+
+  function createResultMessage() {
+    return {
+      type: "result" as const,
+      subtype: "success" as const,
+      is_error: false,
+      result: "",
+      errors: [],
+      stop_reason: "end_turn" as const,
+      cost_usd: 0,
+      duration_ms: 0,
+      duration_api_ms: 0,
+      num_turns: 1,
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      modelUsage: {},
+      permission_denials: [],
+      uuid: randomUUID(),
+      session_id: "test-session",
+    };
+  }
+
+  it("emits all raw messages when set to true", async () => {
+    const { agent, extNotifications } = createMockAgentWithExtNotification();
+    const systemMsg = {
+      type: "system",
+      subtype: "status",
+      status: "compacting",
+      session_id: "test-session",
+    };
+    injectSession(
+      agent,
+      [
+        systemMsg,
+        createResultMessage(),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      true,
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    // Should have emitted extNotifications for all messages (user replay + system + result + session_state_changed)
+    expect(extNotifications.length).toBeGreaterThanOrEqual(3);
+    expect(extNotifications.every((n) => n.method === "_claude/sdkMessage")).toBe(true);
+  });
+
+  it("does not emit when set to false", async () => {
+    const { agent, extNotifications } = createMockAgentWithExtNotification();
+    injectSession(
+      agent,
+      [
+        { type: "system", subtype: "status", status: "compacting", session_id: "test-session" },
+        createResultMessage(),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      false,
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    expect(extNotifications).toHaveLength(0);
+  });
+
+  it("emits only messages matching a filter array", async () => {
+    const { agent, extNotifications } = createMockAgentWithExtNotification();
+    injectSession(
+      agent,
+      [
+        { type: "system", subtype: "compact_boundary", session_id: "test-session" },
+        { type: "system", subtype: "status", status: "compacting", session_id: "test-session" },
+        createResultMessage(),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      [{ type: "system", subtype: "compact_boundary" }],
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    // Only the compact_boundary message should have been emitted
+    const sdkMessages = extNotifications.filter((n) => n.method === "_claude/sdkMessage");
+    expect(sdkMessages).toHaveLength(1);
+    expect(sdkMessages[0].params.sessionId).toBe("test-session");
+    expect(sdkMessages[0].params.message.type).toBe("system");
+    expect(sdkMessages[0].params.message.subtype).toBe("compact_boundary");
+  });
+
+  it("filter without subtype matches all messages of that type", async () => {
+    const { agent, extNotifications } = createMockAgentWithExtNotification();
+    injectSession(
+      agent,
+      [
+        { type: "system", subtype: "compact_boundary", session_id: "test-session" },
+        { type: "system", subtype: "status", status: "compacting", session_id: "test-session" },
+        createResultMessage(),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      [{ type: "system" }],
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const sdkMessages = extNotifications.filter((n) => n.method === "_claude/sdkMessage");
+    // All system messages should match (compact_boundary + status + session_state_changed)
+    const systemMessages = sdkMessages.filter((n) => n.params.message.type === "system");
+    expect(systemMessages).toHaveLength(3);
+  });
+
+  it("supports multiple filters", async () => {
+    const { agent, extNotifications } = createMockAgentWithExtNotification();
+    injectSession(
+      agent,
+      [
+        { type: "system", subtype: "compact_boundary", session_id: "test-session" },
+        { type: "system", subtype: "status", status: "compacting", session_id: "test-session" },
+        createResultMessage(),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      [{ type: "system", subtype: "compact_boundary" }, { type: "result" }],
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const sdkMessages = extNotifications.filter((n) => n.method === "_claude/sdkMessage");
+    expect(sdkMessages).toHaveLength(2);
+    expect(sdkMessages[0].params.message.type).toBe("system");
+    expect(sdkMessages[0].params.message.subtype).toBe("compact_boundary");
+    expect(sdkMessages[1].params.message.type).toBe("result");
   });
 });

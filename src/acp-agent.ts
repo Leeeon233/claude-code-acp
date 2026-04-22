@@ -53,15 +53,14 @@ import {
   PermissionMode,
   Query,
   query,
+  Settings,
   SDKPartialAssistantMessage,
-  SDKResultMessage,
   SDKUserMessage,
   SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import packageJson from "../package.json" with { type: "json" };
@@ -111,21 +110,60 @@ type AccumulatedUsage = {
   cachedWriteTokens: number;
 };
 
+type UsageSnapshot = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+};
+
+const ZERO_USAGE = Object.freeze({
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+});
+
+const DEFAULT_CONTEXT_WINDOW = 200000;
+
 type Session = {
   query: Query;
   input: Pushable<SDKUserMessage>;
   cancelled: boolean;
   cwd: string;
+  /** Serialized snapshot of session-defining params (cwd, mcpServers) used to
+   *  detect when loadSession/resumeSession is called with changed values. */
+  sessionFingerprint: string;
   settingsManager: SettingsManager;
   accumulatedUsage: AccumulatedUsage;
   modes: SessionModeState;
   models: SessionModelState;
+  modelInfos: ModelInfo[];
   configOptions: SessionConfigOption[];
   promptRunning: boolean;
   pendingMessages: Map<string, { resolve: (cancelled: boolean) => void; order: number }>;
   nextPendingOrder: number;
   abortController: AbortController;
+  emitRawSDKMessages: boolean | SDKMessageFilter[];
+  /** Context window size of the last top-level assistant model, carried across
+   *  prompts so mid-stream usage_update notifications report a correct `size`
+   *  before the turn's first result message arrives. Defaults to
+   *  DEFAULT_CONTEXT_WINDOW, refreshed from each result's modelUsage, and
+   *  invalidated when the user switches the session's model. */
+  contextWindowSize: number;
 };
+
+/** Compute a stable fingerprint of the session-defining params so we can
+ *  detect when a loadSession/resumeSession call requires tearing down and
+ *  recreating the underlying Query process.  MCP servers are sorted by name
+ *  so that ordering differences don't trigger unnecessary recreations. */
+function computeSessionFingerprint(params: {
+  cwd: string;
+  mcpServers?: NewSessionRequest["mcpServers"];
+}): string {
+  const servers = [...(params.mcpServers ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  return JSON.stringify({ cwd: params.cwd, mcpServers: servers });
+}
 
 type BackgroundTerminal =
   | {
@@ -137,6 +175,11 @@ type BackgroundTerminal =
     status: "aborted" | "exited" | "killed" | "timedOut";
     pendingOutput: TerminalOutputResponse;
   };
+
+export type SDKMessageFilter = {
+  type: string;
+  subtype?: string;
+};
 
 /**
  * Extra metadata that can be given when creating a new session.
@@ -159,6 +202,14 @@ export type NewSessionMeta = {
      *   - tools (passed through; defaults to claude_code preset if not provided)
      */
     options?: Options;
+    /**
+     * When set, raw SDK messages are emitted as extNotification("_claude/sdkMessage", message)
+     * in addition to normal processing.
+     * - true: emit all messages
+     * - false/undefined: emit nothing (default)
+     * - SDKMessageFilter[]: emit only messages matching at least one filter
+     */
+    emitRawSDKMessages?: boolean | SDKMessageFilter[];
   };
   additionalRoots?: string[];
 };
@@ -213,14 +264,34 @@ export type ToolUseCache = {
   };
 };
 
-function isStaticBinary(): boolean {
-  return process.env.CLAUDE_AGENT_ACP_IS_SINGLE_FILE_BUN !== undefined;
-}
-
 export async function claudeCliPath(): Promise<string> {
-  return isStaticBinary()
-    ? (await import("@anthropic-ai/claude-agent-sdk/embed")).default
-    : import.meta.resolve("@anthropic-ai/claude-agent-sdk").replace("sdk.mjs", "cli.js");
+  if (process.env.CLAUDE_CODE_EXECUTABLE) {
+    return process.env.CLAUDE_CODE_EXECUTABLE;
+  }
+  // The SDK's CLI is a native binary shipped as a platform-specific optional
+  // dependency of @anthropic-ai/claude-agent-sdk. Resolve via a require bound
+  // to the SDK so nested installs are found even when npm doesn't hoist.
+  const { createRequire } = await import("node:module");
+  const req = createRequire(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const candidates =
+    process.platform === "linux"
+      ? [
+          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
+          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
+        ]
+      : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${ext}`];
+  for (const candidate of candidates) {
+    try {
+      return req.resolve(candidate);
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error(
+    `Claude native binary not found for ${process.platform}-${process.arch}. ` +
+      `Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set CLAUDE_CODE_EXECUTABLE.`,
+  );
 }
 
 function shouldHideClaudeAuth(): boolean {
@@ -313,39 +384,82 @@ export class ClaudeAcpAgent implements Agent {
     const supportsTerminalAuth = request.clientCapabilities?.auth?.terminal === true;
     const supportsMetaTerminalAuth = request.clientCapabilities?._meta?.["terminal-auth"] === true;
 
-    const claudeLoginMethod: any = {
-      description: "Use Claude subscription ",
-      name: "Claude Subscription",
-      id: "claude-ai-login",
-      type: "terminal",
-      args: ["--cli", "auth", "login", "--claudeai"],
-    };
+    // Detect remote environments where the OAuth browser redirect to localhost
+    // won't work. This matches the SDK's internal isRemote check. In these cases,
+    // the `auth login` subcommand would fall back to a device-code-like manual
+    // flow, which doesn't work well over ACP, so we offer the TUI login instead.
+    const isRemote = !!(
+      process.env.NO_BROWSER ||
+      process.env.SSH_CONNECTION ||
+      process.env.SSH_CLIENT ||
+      process.env.SSH_TTY ||
+      process.env.CLAUDE_CODE_REMOTE
+    );
+    const terminalAuthMethods: AuthMethod[] = [];
 
-    const consoleLoginMethod: any = {
-      description: "Use Anthropic Console (API usage billing)",
-      name: "Anthropic Console",
-      id: "console-login",
-      type: "terminal",
-      args: ["--cli", "auth", "login", "--console"],
-    };
+    if (isRemote) {
+      const remoteLoginMethod: AuthMethod = {
+        description: "Run `claude /login` in the terminal",
+        name: "Log in with Claude",
+        id: "claude-login",
+        type: "terminal",
+        args: ["--cli"],
+      };
 
-    // If client supports terminal-auth capability, use that instead.
-    if (supportsMetaTerminalAuth) {
-      const baseArgs = process.argv.slice(1);
-      claudeLoginMethod._meta = {
-        "terminal-auth": {
-          command: process.execPath,
-          args: [...baseArgs, "--cli", "auth", "login", "--claudeai"],
-          label: "Claude Login",
-        },
+      if (supportsMetaTerminalAuth) {
+        remoteLoginMethod._meta = {
+          "terminal-auth": {
+            command: process.execPath,
+            args: [...process.argv.slice(1), "--cli"],
+            label: "Claude Login",
+          },
+        };
+      }
+
+      if (!shouldHideClaudeAuth() && (supportsTerminalAuth || supportsMetaTerminalAuth)) {
+        terminalAuthMethods.push(remoteLoginMethod);
+      }
+    } else {
+      const claudeLoginMethod: AuthMethod = {
+        description: "Use Claude subscription ",
+        name: "Claude Subscription",
+        id: "claude-ai-login",
+        type: "terminal",
+        args: ["--cli", "auth", "login", "--claudeai"],
       };
-      consoleLoginMethod._meta = {
-        "terminal-auth": {
-          command: process.execPath,
-          args: [...baseArgs, "--cli", "auth", "login", "--console"],
-          label: "Anthropic Console Login",
-        },
+
+      const consoleLoginMethod: AuthMethod = {
+        description: "Use Anthropic Console (API usage billing)",
+        name: "Anthropic Console",
+        id: "console-login",
+        type: "terminal",
+        args: ["--cli", "auth", "login", "--console"],
       };
+
+      if (supportsMetaTerminalAuth) {
+        const baseArgs = process.argv.slice(1);
+        claudeLoginMethod._meta = {
+          "terminal-auth": {
+            command: process.execPath,
+            args: [...baseArgs, "--cli", "auth", "login", "--claudeai"],
+            label: "Claude Login",
+          },
+        };
+        consoleLoginMethod._meta = {
+          "terminal-auth": {
+            command: process.execPath,
+            args: [...baseArgs, "--cli", "auth", "login", "--console"],
+            label: "Anthropic Console Login",
+          },
+        };
+      }
+
+      if (!shouldHideClaudeAuth() && (supportsTerminalAuth || supportsMetaTerminalAuth)) {
+        terminalAuthMethods.push(claudeLoginMethod);
+      }
+      if (supportsTerminalAuth || supportsMetaTerminalAuth) {
+        terminalAuthMethods.push(consoleLoginMethod);
+      }
     }
 
     return {
@@ -377,25 +491,11 @@ export class ClaudeAcpAgent implements Agent {
         title: "Claude Agent",
         version: packageJson.version,
       },
-      authMethods: [
-        ...(!shouldHideClaudeAuth() && (supportsTerminalAuth || supportsMetaTerminalAuth)
-          ? [claudeLoginMethod]
-          : []),
-        ...(supportsTerminalAuth || supportsMetaTerminalAuth ? [consoleLoginMethod] : []),
-        ...(supportsGatewayAuth ? [gatewayAuthMethod] : []),
-      ],
+      authMethods: [...terminalAuthMethods, ...(supportsGatewayAuth ? [gatewayAuthMethod] : [])],
     };
   }
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
-    if (
-      !this.gatewayAuthMeta &&
-      fs.existsSync(path.resolve(os.homedir(), ".claude.json.backup")) &&
-      !fs.existsSync(path.resolve(os.homedir(), ".claude.json"))
-    ) {
-      throw RequestError.authRequired();
-    }
-
     const response = await this.createSession(params, {
       // Revisit these meta values once we support resume
       resume: (params._meta as NewSessionMeta | undefined)?.claudeCode?.options?.resume,
@@ -490,8 +590,8 @@ export class ClaudeAcpAgent implements Agent {
     };
 
     let lastAssistantTotalUsage: number | null = null;
+    let lastAssistantUsage: UsageSnapshot | null = null;
     let lastAssistantModel: string | null = null;
-    let lastContextWindowSize: number = 200000;
 
     const userMessage = promptToClaude(params);
 
@@ -533,6 +633,16 @@ export class ClaudeAcpAgent implements Agent {
           break;
         }
 
+        if (
+          session.emitRawSDKMessages &&
+          shouldEmitRawMessage(session.emitRawSDKMessages, message)
+        ) {
+          await this.client.extNotification("_claude/sdkMessage", {
+            sessionId: params.sessionId,
+            message: message as Record<string, unknown>,
+          });
+        }
+
         switch (message.type) {
           case "system":
             switch (message.subtype) {
@@ -563,12 +673,13 @@ export class ClaudeAcpAgent implements Agent {
                 // "944k/1m" right after the user sees "Compacting completed",
                 // which is confusing and wrong.
                 lastAssistantTotalUsage = 0;
+                lastAssistantUsage = null;
                 await this.client.sessionUpdate({
                   sessionId: message.session_id,
                   update: {
                     sessionUpdate: "usage_update",
                     used: 0,
-                    size: lastContextWindowSize,
+                    size: session.contextWindowSize,
                   },
                 });
                 await this.client.sessionUpdate({
@@ -603,8 +714,13 @@ export class ClaudeAcpAgent implements Agent {
               case "task_started":
               case "task_notification":
               case "task_progress":
+              case "task_updated":
               case "elicitation_complete":
+              case "plugin_install":
+              case "memory_recall":
+              case "notification":
               case "api_retry":
+              case "mirror_error":
                 // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
                 break;
               default:
@@ -622,8 +738,13 @@ export class ClaudeAcpAgent implements Agent {
             const matchingModelUsage = lastAssistantModel
               ? getMatchingModelUsage(message.modelUsage, lastAssistantModel)
               : null;
-            const contextWindowSize = matchingModelUsage?.contextWindow ?? 200000;
-            lastContextWindowSize = contextWindowSize;
+            // Only overwrite when we have an authoritative value — a miss
+            // (e.g. a turn with no top-level assistant message) would
+            // otherwise discard the window learned on a prior turn and
+            // leave the next prompt's mid-stream updates reporting 200k.
+            if (matchingModelUsage) {
+              session.contextWindowSize = matchingModelUsage.contextWindow;
+            }
 
             // Send usage_update notification
             if (lastAssistantTotalUsage !== null) {
@@ -632,7 +753,7 @@ export class ClaudeAcpAgent implements Agent {
                 update: {
                   sessionUpdate: "usage_update",
                   used: lastAssistantTotalUsage,
-                  size: contextWindowSize,
+                  size: session.contextWindowSize,
                   cost: {
                     amount: message.total_cost_usd,
                     currency: "USD",
@@ -734,6 +855,57 @@ export class ClaudeAcpAgent implements Agent {
             break;
           }
           case "stream_event": {
+            if (
+              message.parent_tool_use_id === null &&
+              (message.event.type === "message_start" || message.event.type === "message_delta")
+            ) {
+              if (message.event.type === "message_start") {
+                lastAssistantUsage = snapshotFromUsage(message.event.message.usage);
+                const model = message.event.message.model;
+                if (model && model !== "<synthetic>") {
+                  lastAssistantModel = model;
+                  // Only upgrade from the default — once a `result` has given
+                  // us an authoritative window, trust it over the heuristic.
+                  // Model switches invalidate the cached window via
+                  // `syncSessionConfigState`, which resets us back to the
+                  // default so this branch runs again for the new model.
+                  if (session.contextWindowSize === DEFAULT_CONTEXT_WINDOW) {
+                    const inferred = inferContextWindowFromModel(model);
+                    if (inferred !== null) {
+                      session.contextWindowSize = inferred;
+                    }
+                  }
+                }
+              } else {
+                const usage = message.event.usage;
+                const prev: Readonly<UsageSnapshot> = lastAssistantUsage ?? ZERO_USAGE;
+                // Per Anthropic API, message_delta usage fields are *cumulative*;
+                // nullable fields (input_tokens and the cache fields) fall back
+                // to the prior snapshot when the server omits them from this
+                // delta. Only output_tokens is guaranteed non-null.
+                lastAssistantUsage = {
+                  input_tokens: usage.input_tokens ?? prev.input_tokens,
+                  output_tokens: usage.output_tokens,
+                  cache_read_input_tokens:
+                    usage.cache_read_input_tokens ?? prev.cache_read_input_tokens,
+                  cache_creation_input_tokens:
+                    usage.cache_creation_input_tokens ?? prev.cache_creation_input_tokens,
+                };
+              }
+
+              const nextUsage = totalTokens(lastAssistantUsage);
+              if (nextUsage !== lastAssistantTotalUsage) {
+                lastAssistantTotalUsage = nextUsage;
+                await this.client.sessionUpdate({
+                  sessionId: params.sessionId,
+                  update: {
+                    sessionUpdate: "usage_update",
+                    used: nextUsage,
+                    size: session.contextWindowSize,
+                  },
+                });
+              }
+            }
             for (const notification of streamEventToAcpNotifications(
               message,
               params.sessionId,
@@ -776,29 +948,16 @@ export class ClaudeAcpAgent implements Agent {
               }
             }
 
-            // Store latest assistant usage (excluding subagents)
-            // Sum all token types as a proxy for post-turn context occupancy:
-            // current turn's output will become next turn's input.
-            // Note: per the Anthropic API, input_tokens excludes cache tokens —
-            // cache_read and cache_creation are reported separately, so summing
-            // all four fields is not double-counting.
-            if ((message.message as any).usage && message.parent_tool_use_id === null) {
-              const messageWithUsage = message.message as unknown as SDKResultMessage;
-              lastAssistantTotalUsage =
-                messageWithUsage.usage.input_tokens +
-                messageWithUsage.usage.output_tokens +
-                messageWithUsage.usage.cache_read_input_tokens +
-                messageWithUsage.usage.cache_creation_input_tokens;
-            }
-            // Track the current top-level model for context window size lookup
-            // (exclude subagent messages to stay in sync with lastAssistantTotalUsage)
-            if (
-              message.type === "assistant" &&
-              message.parent_tool_use_id === null &&
-              message.message.model &&
-              message.message.model !== "<synthetic>"
-            ) {
-              lastAssistantModel = message.message.model;
+            // Snapshot the latest top-level assistant usage and model so the
+            // next `result` can emit a usage_update tied to the right context
+            // window. Subagent messages are excluded to keep the snapshot
+            // aligned with what the user's current selection is producing.
+            if (message.type === "assistant" && message.parent_tool_use_id === null) {
+              lastAssistantUsage = snapshotFromUsage(message.message.usage);
+              lastAssistantTotalUsage = totalTokens(lastAssistantUsage);
+              if (message.message.model && message.message.model !== "<synthetic>") {
+                lastAssistantModel = message.message.model;
+              }
             }
 
             // Slash commands like /compact can generate invalid output... doesn't match
@@ -921,7 +1080,7 @@ export class ClaudeAcpAgent implements Agent {
   async cancel(params: CancelNotification): Promise<void> {
     const session = this.sessions[params.sessionId];
     if (!session) {
-      throw new Error("Session not found");
+      return;
     }
     session.cancelled = true;
     for (const [, pending] of session.pendingMessages) {
@@ -931,28 +1090,47 @@ export class ClaudeAcpAgent implements Agent {
     await session.query.interrupt();
   }
 
-  async unstable_closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
-    const session = this.sessions[params.sessionId];
+  /** Cleanly tear down a session: cancel in-flight work, dispose resources,
+   *  and remove it from the session map. */
+  private async teardownSession(sessionId: string): Promise<void> {
+    const session = this.sessions[sessionId];
     if (!session) {
-      throw new Error("Session not found");
+      return;
     }
-    await this.cancel({ sessionId: params.sessionId });
-
+    await this.cancel({ sessionId });
     session.settingsManager.dispose();
     session.abortController.abort();
-    delete this.sessions[params.sessionId];
+    session.query.close();
+    delete this.sessions[sessionId];
+  }
 
+  /** Tear down all active sessions. Called when the ACP connection closes. */
+  async dispose(): Promise<void> {
+    await Promise.all(Object.keys(this.sessions).map((id) => this.teardownSession(id)));
+  }
+
+  async unstable_closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    if (!this.sessions[params.sessionId]) {
+      throw new Error("Session not found");
+    }
+    await this.teardownSession(params.sessionId);
     return {};
   }
 
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse | void> {
-    if (!this.sessions[params.sessionId]) {
+    const session = this.sessions[params.sessionId];
+    if (!session) {
       throw new Error("Session not found");
     }
-    await this.sessions[params.sessionId].query.setModel(params.modelId);
-    await this.updateConfigOption(params.sessionId, "model", params.modelId);
+    // Resolve aliases (e.g. "opus", "opus[1m]") to canonical model IDs so
+    // downstream lookups in modelInfos succeed and the effort option isn't
+    // silently dropped.
+    const resolved = resolveModelPreference(session.modelInfos, params.modelId);
+    const modelId = resolved?.value ?? params.modelId;
+    await session.query.setModel(modelId);
+    await this.updateConfigOption(params.sessionId, "model", modelId);
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1022,20 +1200,18 @@ export class ClaudeAcpAgent implements Agent {
     } else if (params.configId === "model") {
       await this.sessions[params.sessionId].query.setModel(resolvedValue);
     }
+    // Effort SDK sync is handled inside applyConfigOptionValue so that direct
+    // effort changes and effort changes induced by a model switch go through
+    // the same path.
 
-    this.syncSessionConfigState(session, params.configId, params.value);
-
-    session.configOptions = session.configOptions.map((o) =>
-      o.id === params.configId && typeof o.currentValue === "string"
-        ? { ...o, currentValue: resolvedValue }
-        : o,
-    );
+    await this.applyConfigOptionValue(session, params.configId, resolvedValue);
 
     return { configOptions: session.configOptions };
   }
 
   private async applySessionMode(sessionId: string, modeId: string): Promise<void> {
     switch (modeId) {
+      case "auto":
       case "default":
       case "acceptEdits":
       case "bypassPermissions":
@@ -1108,6 +1284,7 @@ export class ClaudeAcpAgent implements Agent {
 
       if (toolName === "ExitPlanMode") {
         const options = [
+          { kind: "allow_always", name: 'Yes, and use "auto" mode', optionId: "auto" },
           {
             kind: "allow_always",
             name: "Yes, and auto-accept edits",
@@ -1145,6 +1322,7 @@ export class ClaudeAcpAgent implements Agent {
           response.outcome?.outcome === "selected" &&
           (response.outcome.optionId === "default" ||
             response.outcome.optionId === "acceptEdits" ||
+            response.outcome.optionId === "auto" ||
             response.outcome.optionId === "bypassPermissions")
         ) {
           await this.client.sessionUpdate({
@@ -1258,11 +1436,7 @@ export class ClaudeAcpAgent implements Agent {
     const session = this.sessions[sessionId];
     if (!session) return;
 
-    this.syncSessionConfigState(session, configId, value);
-
-    session.configOptions = session.configOptions.map((o) =>
-      o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
-    );
+    await this.applyConfigOptionValue(session, configId, value);
 
     await this.client.sessionUpdate({
       sessionId,
@@ -1273,11 +1447,56 @@ export class ClaudeAcpAgent implements Agent {
     });
   }
 
-  private syncSessionConfigState(session: Session, configId: string, value: string): void {
+  private async applyConfigOptionValue(
+    session: Session,
+    configId: string,
+    value: string,
+  ): Promise<void> {
+    // Sync top-level session state
     if (configId === "mode") {
       session.modes = { ...session.modes, currentModeId: value };
     } else if (configId === "model") {
+      if (session.models.currentModelId !== value) {
+        // The cached context window was learned for the previous model; reset
+        // to the new model's heuristic so mid-stream updates between now and
+        // the next `result` reflect the user's selection instead of the old
+        // model's window.
+        session.contextWindowSize = inferContextWindowFromModel(value) ?? DEFAULT_CONTEXT_WINDOW;
+      }
       session.models = { ...session.models, currentModelId: value };
+    }
+
+    // Update configOptions
+    if (configId === "model") {
+      // Rebuild config options since effort levels depend on the selected model
+      const effortOpt = session.configOptions.find((o) => o.id === "effort");
+      const currentEffort =
+        typeof effortOpt?.currentValue === "string" ? effortOpt.currentValue : undefined;
+      session.configOptions = buildConfigOptions(
+        session.modes,
+        session.models,
+        session.modelInfos,
+        currentEffort,
+      );
+
+      // Sync effort with the SDK if it changed after the model switch
+      const newEffortOpt = session.configOptions.find((o) => o.id === "effort");
+      const newEffort =
+        typeof newEffortOpt?.currentValue === "string" ? newEffortOpt.currentValue : undefined;
+      if (newEffort !== currentEffort) {
+        await session.query.applyFlagSettings({
+          effortLevel: newEffort as Settings["effortLevel"],
+        });
+      }
+    } else {
+      session.configOptions = session.configOptions.map((o) =>
+        o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
+      );
+      if (configId === "effort") {
+        await session.query.applyFlagSettings({
+          effortLevel: value as Settings["effortLevel"],
+        });
+      }
     }
   }
 
@@ -1289,12 +1508,20 @@ export class ClaudeAcpAgent implements Agent {
   }): Promise<NewSessionResponse> {
     const existingSession = this.sessions[params.sessionId];
     if (existingSession) {
-      return {
-        sessionId: params.sessionId,
-        modes: existingSession.modes,
-        models: existingSession.models,
-        configOptions: existingSession.configOptions,
-      };
+      const fingerprint = computeSessionFingerprint(params);
+      if (fingerprint === existingSession.sessionFingerprint) {
+        return {
+          sessionId: params.sessionId,
+          modes: existingSession.modes,
+          models: existingSession.models,
+          configOptions: existingSession.configOptions,
+        };
+      }
+
+      // Session-defining params changed (e.g. cwd pointed at a git worktree,
+      // or MCP servers reconfigured). Tear down the existing session and
+      // recreate it so the underlying Query process picks up the new values.
+      await this.teardownSession(params.sessionId);
     }
 
     const response = await this.createSession(
@@ -1425,14 +1652,7 @@ export class ClaudeAcpAgent implements Agent {
       allowDangerouslySkipPermissions: ALLOW_BYPASS,
       permissionMode,
       canUseTool: this.canUseTool(sessionId),
-      // note: although not documented by the types, passing an absolute path
-      // here works to find zed's managed node version.
-      executable: isStaticBinary() ? undefined : (process.execPath as any),
-      ...(process.env.CLAUDE_CODE_EXECUTABLE
-        ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE }
-        : isStaticBinary()
-          ? { pathToClaudeCodeExecutable: await claudeCliPath() }
-          : {}),
+      pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE,
       extraArgs: {
         ...userProvidedOptions?.extraArgs,
         "replay-user-messages": "",
@@ -1492,7 +1712,8 @@ export class ClaudeAcpAgent implements Agent {
       if (
         creationOpts.resume &&
         error instanceof Error &&
-        error.message === "Query closed before response received"
+        (error.message === "Query closed before response received" ||
+          error.message.includes("No conversation found with session ID"))
       ) {
         throw RequestError.resourceNotFound(sessionId);
       }
@@ -1516,7 +1737,7 @@ export class ClaudeAcpAgent implements Agent {
       {
         id: "auto",
         name: "Auto",
-        decription: "Use a model classifier to approve/deny permission prompts.",
+        description: "Use a model classifier to approve/deny permission prompts",
       },
       {
         id: "default",
@@ -1553,13 +1774,27 @@ export class ClaudeAcpAgent implements Agent {
       availableModes,
     };
 
-    const configOptions = buildConfigOptions(modes, models);
+    const configOptions = buildConfigOptions(
+      modes,
+      models,
+      initializationResult.models,
+      settingsManager.getSettings().effortLevel,
+    );
+
+    // Apply the initial effort level to the SDK so it matches the UI default
+    const initialEffort = configOptions.find((o) => o.id === "effort");
+    if (initialEffort && typeof initialEffort.currentValue === "string") {
+      await q.applyFlagSettings({
+        effortLevel: initialEffort.currentValue as Settings["effortLevel"],
+      });
+    }
 
     this.sessions[sessionId] = {
       query: q,
       input: input,
       cancelled: false,
       cwd: params.cwd,
+      sessionFingerprint: computeSessionFingerprint(params),
       settingsManager,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1569,11 +1804,15 @@ export class ClaudeAcpAgent implements Agent {
       },
       modes,
       models,
+      modelInfos: initializationResult.models,
       configOptions,
       promptRunning: false,
       pendingMessages: new Map(),
       nextPendingOrder: 0,
       abortController,
+      emitRawSDKMessages: sessionMeta?.claudeCode?.emitRawSDKMessages ?? false,
+      contextWindowSize:
+        inferContextWindowFromModel(models.currentModelId) ?? DEFAULT_CONTEXT_WINDOW,
     };
 
     return {
@@ -1583,6 +1822,17 @@ export class ClaudeAcpAgent implements Agent {
       configOptions,
     };
   }
+}
+
+function shouldEmitRawMessage(
+  config: boolean | SDKMessageFilter[],
+  message: { type: string; subtype?: string },
+): boolean {
+  if (config === true) return true;
+  if (config === false) return false;
+  return config.some(
+    (f) => f.type === message.type && (f.subtype === undefined || f.subtype === message.subtype),
+  );
 }
 
 function sessionUsage(session: Session) {
@@ -1596,6 +1846,41 @@ function sessionUsage(session: Session) {
       session.accumulatedUsage.outputTokens +
       session.accumulatedUsage.cachedReadTokens +
       session.accumulatedUsage.cachedWriteTokens,
+  };
+}
+
+/** Sum all four fields as a proxy for post-turn context occupancy: the current
+ *  turn's output becomes next turn's input. Per the Anthropic API, input_tokens
+ *  excludes cache tokens — cache_read and cache_creation are reported
+ *  separately — so summing all four is not double-counting. */
+function totalTokens(usage: UsageSnapshot): number {
+  return (
+    usage.input_tokens +
+    usage.output_tokens +
+    usage.cache_read_input_tokens +
+    usage.cache_creation_input_tokens
+  );
+}
+
+/** Project a nullable API usage object into our non-null snapshot shape.
+ *  Both SDK message_start and assistant message `usage` have `number | null`
+ *  cache fields; we coerce absent values to 0 so `totalTokens` never hits
+ *  NaN. `input_tokens`/`output_tokens` are typed `number` by the SDK but
+ *  synthetic or third-party-backend stream events have been observed emitting
+ *  them as null/undefined — coerce those too so a malformed upstream event
+ *  can't leak NaN into the wire `used` field. Delta events have different
+ *  semantics (cumulative + prev fallback) and are handled inline. */
+function snapshotFromUsage(usage: {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}): UsageSnapshot {
+  return {
+    input_tokens: usage.input_tokens ?? 0,
+    output_tokens: usage.output_tokens ?? 0,
+    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
   };
 }
 
@@ -1615,8 +1900,10 @@ function createEnvForGateway(gatewayMeta?: GatewayAuthMeta) {
 function buildConfigOptions(
   modes: SessionModeState,
   models: SessionModelState,
+  modelInfos: ModelInfo[],
+  currentEffortLevel?: string,
 ): SessionConfigOption[] {
-  return [
+  const options: SessionConfigOption[] = [
     {
       id: "mode",
       name: "Mode",
@@ -1644,6 +1931,46 @@ function buildConfigOptions(
       })),
     },
   ];
+
+  // Add effort level option based on the currently selected model
+  const currentModelInfo = modelInfos.find((m) => m.value === models.currentModelId);
+  const supportedLevels = currentModelInfo?.supportsEffort
+    ? (currentModelInfo.supportedEffortLevels ?? [])
+    : [];
+
+  if (supportedLevels.length > 0) {
+    const effortOptions = supportedLevels.map((level) => ({
+      value: level,
+      name: level
+        .split(/[_-]/)
+        .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+        .join(" "),
+    }));
+
+    // Keep the current level if valid, otherwise prefer xhigh (Claude Code's
+    // recommended default for capable models), then high (the API default).
+    const includes = (l: string) => (supportedLevels as string[]).includes(l);
+    const validEffort =
+      currentEffortLevel && includes(currentEffortLevel)
+        ? currentEffortLevel
+        : includes("xhigh")
+          ? "xhigh"
+          : includes("high")
+            ? "high"
+            : supportedLevels[0];
+
+    options.push({
+      id: "effort",
+      name: "Effort",
+      description: "Available effort levels for this model",
+      category: "effort",
+      type: "select",
+      currentValue: validEffort,
+      options: effortOptions,
+    });
+  }
+
+  return options;
 }
 
 // Claude Code CLI persists display strings like "opus[1m]" in settings,
@@ -1728,7 +2055,16 @@ async function getAvailableModels(
 
   let currentModel = models[0];
 
-  if (settings.model) {
+  // Model priority (highest to lowest):
+  // 1. ANTHROPIC_MODEL environment variable
+  // 2. settings.model (user configuration)
+  // 3. models[0] (default first model)
+  if (process.env.ANTHROPIC_MODEL) {
+    const match = resolveModelPreference(models, process.env.ANTHROPIC_MODEL);
+    if (match) {
+      currentModel = match;
+    }
+  } else if (settings.model) {
     const match = resolveModelPreference(models, settings.model);
     if (match) {
       currentModel = match;
@@ -1960,8 +2296,8 @@ export function toAcpNotifications(
         const alreadyCached = chunk.id in toolUseCache;
         toolUseCache[chunk.id] = chunk;
         if (chunk.name === "TodoWrite") {
-          // @ts-expect-error - sometimes input is empty object
-          if (Array.isArray(chunk.input.todos)) {
+          // @ts-expect-error - sometimes input is empty object or undefined
+          if (Array.isArray(chunk.input?.todos)) {
             update = {
               sessionUpdate: "plan",
               entries: planEntries(chunk.input as { todos: ClaudePlanEntry[] }),
@@ -2115,6 +2451,7 @@ export function toAcpNotifications(
       case "container_upload":
       case "compaction":
       case "compaction_delta":
+      case "advisor_tool_result":
         break;
 
       default:
@@ -2197,7 +2534,12 @@ export function runAcp() {
   const output = nodeToWebReadable(process.stdin);
 
   const stream = ndJsonStream(input, output);
-  new AgentSideConnection((client) => new ClaudeAcpAgent(client), stream);
+  let agent!: ClaudeAcpAgent;
+  const connection = new AgentSideConnection((client) => {
+    agent = new ClaudeAcpAgent(client);
+    return agent;
+  }, stream);
+  return { connection, agent };
 }
 
 function commonPrefixLength(a: string, b: string) {
@@ -2206,6 +2548,16 @@ function commonPrefixLength(a: string, b: string) {
     i++;
   }
   return i;
+}
+
+/** Best-effort first guess of a model's context window from its ID, used only
+ *  until a `result` message arrives with the authoritative `modelUsage` value.
+ *  Anthropic 1M-context variants encode "1m" as a distinct token in the SDK
+ *  model ID (e.g., "claude-opus-4-6-1m"), which `\b1m\b` catches without also
+ *  matching things like "10m" or embedded substrings. */
+function inferContextWindowFromModel(model: string): number | null {
+  if (/\b1m\b/i.test(model)) return 1_000_000;
+  return null;
 }
 
 function getMatchingModelUsage(modelUsage: Record<string, ModelUsage>, currentModel: string) {
