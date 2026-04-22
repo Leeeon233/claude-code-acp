@@ -1850,6 +1850,7 @@ describe("usage_update computation", () => {
       sessionUpdate: async (notification: any) => {
         updates.push(notification);
       },
+      extMethod: async () => { },
     } as unknown as AgentSideConnection;
     const agent = new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
     return { agent, updates };
@@ -2742,6 +2743,7 @@ describe("emitRawSDKMessages", () => {
       extNotification: async (method: string, params: any) => {
         extNotifications.push({ method, params });
       },
+      extMethod: async () => { },
     } as unknown as AgentSideConnection;
     const agent = new ClaudeAcpAgent(mockClient, { log: () => { }, error: () => { } });
     return { agent, updates, extNotifications };
