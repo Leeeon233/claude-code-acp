@@ -86,6 +86,53 @@ describe("createSession options merging", () => {
     expect(capturedOptions!.disallowedTools).toContain("AskUserQuestion");
   });
 
+  it("allows AskUserQuestion when the client advertises ACP question support", async () => {
+    await agent.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {
+        _meta: {
+          claudeCode: {
+            askUserQuestion: true,
+          },
+        },
+      },
+    } as any);
+
+    await agent.newSession({
+      cwd: "/test",
+      mcpServers: [],
+    });
+
+    expect(capturedOptions!.disallowedTools).not.toContain("AskUserQuestion");
+  });
+
+  it("still honors user-disallowed AskUserQuestion when the client supports questions", async () => {
+    await agent.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {
+        _meta: {
+          claudeCode: {
+            askUserQuestion: true,
+          },
+        },
+      },
+    } as any);
+
+    await agent.newSession({
+      cwd: "/test",
+      mcpServers: [],
+      _meta: {
+        claudeCode: {
+          options: {
+            disallowedTools: ["AskUserQuestion"],
+          },
+        },
+      },
+    });
+
+    expect(capturedOptions!.disallowedTools).toContain("AskUserQuestion");
+  });
+
   it("works when user provides empty disallowedTools", async () => {
     await agent.newSession({
       cwd: "/test",
