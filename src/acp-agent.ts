@@ -466,7 +466,6 @@ function supportsAskUserQuestion(clientCapabilities?: ClientCapabilities): boole
 function resolveBuiltInTools(options: {
   userProvidedTools: Options["tools"] | undefined;
   disableBuiltInTools: boolean;
-  supportsAskUserQuestion: boolean;
 }): Options["tools"] {
   if (options.userProvidedTools !== undefined) {
     return options.userProvidedTools;
@@ -474,13 +473,6 @@ function resolveBuiltInTools(options: {
 
   if (options.disableBuiltInTools) {
     return [];
-  }
-
-  if (options.supportsAskUserQuestion) {
-    // The SDK preset serializes to `--tools default`, which does not expose
-    // AskUserQuestion. The CLI accepts `default,AskUserQuestion`, preserving
-    // future default tools while adding the ACP-backed question tool.
-    return ["default", "AskUserQuestion"];
   }
 
   return { type: "preset", preset: "claude_code" };
@@ -1967,7 +1959,6 @@ export class ClaudeAcpAgent implements Agent {
     const tools = resolveBuiltInTools({
       userProvidedTools: userProvidedOptions?.tools,
       disableBuiltInTools: params._meta?.disableBuiltInTools === true,
-      supportsAskUserQuestion: canAskUserQuestion,
     });
 
     const abortController = userProvidedOptions?.abortController || new AbortController();

@@ -104,7 +104,7 @@ describe("createSession options merging", () => {
     });
 
     expect(capturedOptions!.disallowedTools).not.toContain("AskUserQuestion");
-    expect(capturedOptions!.tools).toEqual(["default", "AskUserQuestion"]);
+    expect(capturedOptions!.tools).toEqual({ type: "preset", preset: "claude_code" });
   });
 
   it("still honors user-disallowed AskUserQuestion when the client supports questions", async () => {
