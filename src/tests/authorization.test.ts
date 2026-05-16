@@ -5,9 +5,12 @@ import { AgentSideConnection } from "@agentclientprotocol/sdk";
 const mockQuery = vi.hoisted(() =>
   vi.fn(() => ({
     initializationResult: vi.fn().mockResolvedValue({
-      models: [{ value: "id", displayName: "name", description: "description" }],
+      models: [
+        { value: "id", displayName: "name", description: "description", supportsAutoMode: true },
+      ],
     }),
     setModel: vi.fn(),
+    setPermissionMode: vi.fn(),
     supportedCommands: vi.fn().mockResolvedValue([]),
   })),
 );
@@ -50,6 +53,9 @@ describe("authorization", () => {
     expect(initializeResponse.authMethods).not.toContainEqual(
       expect.objectContaining({ id: "gateway" }),
     );
+    expect(initializeResponse.authMethods).not.toContainEqual(
+      expect.objectContaining({ id: "gateway-bedrock" }),
+    );
   });
 
   it("advertises AskUserQuestion ACP extension support", async () => {
@@ -80,11 +86,20 @@ describe("authorization", () => {
       } as any,
     });
     expect(initializeResponse.authMethods).toContainEqual(
-      expect.objectContaining({ id: "gateway" }),
+      expect.objectContaining({
+        id: "gateway",
+        _meta: { gateway: { protocol: "anthropic" } },
+      }),
+    );
+    expect(initializeResponse.authMethods).toContainEqual(
+      expect.objectContaining({
+        id: "gateway-bedrock",
+        _meta: { gateway: { protocol: "bedrock" } },
+      }),
     );
   });
 
-  it("uses gateway env after gateway auth", async () => {
+  it("uses gateway env after anthropic gateway auth", async () => {
     const [agent, mockQuery] = await createAgentMock();
 
     const initializeResponse = await agent.initialize({
@@ -124,6 +139,42 @@ describe("authorization", () => {
             ANTHROPIC_BASE_URL: "https://gateway.example",
             ANTHROPIC_CUSTOM_HEADERS: "x-api-key: test",
             userEnv: "userEnv",
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("uses gateway env after gateway auth", async () => {
+    const [agent, mockQuery] = await createAgentMock();
+
+    await agent.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {
+        auth: { terminal: true, _meta: { gateway: true } },
+      } as any,
+    });
+
+    await agent.authenticate({
+      methodId: "gateway-bedrock",
+      _meta: {
+        gateway: { baseUrl: "https://gateway.example", headers: { "custom-header": "test" } },
+      },
+    });
+
+    await agent.newSession({
+      cwd: "testRoot",
+      mcpServers: [],
+    });
+
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({
+          env: expect.objectContaining({
+            CLAUDE_CODE_USE_BEDROCK: "1",
+            AWS_BEARER_TOKEN_BEDROCK: " ",
+            ANTHROPIC_BEDROCK_BASE_URL: "https://gateway.example",
+            ANTHROPIC_CUSTOM_HEADERS: "custom-header: test",
           }),
         }),
       }),
