@@ -18,7 +18,7 @@ export {
   toolUpdateFromToolResult,
 } from "./tools.js";
 export { SettingsManager, type SettingsManagerOptions } from "./settings.js";
-export { getUsage, UsageApiDeps } from './usage.js'
+export { getUsage, UsageApiDeps } from "./usage.js";
 
 // Export types
 export type { ClaudePlanEntry } from "./tools.js";

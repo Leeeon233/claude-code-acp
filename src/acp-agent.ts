@@ -206,14 +206,14 @@ function computeSessionFingerprint(params: {
 
 type BackgroundTerminal =
   | {
-    handle: TerminalHandle;
-    status: "started";
-    lastOutput: TerminalOutputResponse | null;
-  }
+      handle: TerminalHandle;
+      status: "started";
+      lastOutput: TerminalOutputResponse | null;
+    }
   | {
-    status: "aborted" | "exited" | "killed" | "timedOut";
-    pendingOutput: TerminalOutputResponse;
-  };
+      status: "aborted" | "exited" | "killed" | "timedOut";
+      pendingOutput: TerminalOutputResponse;
+    };
 
 export type SDKMessageFilter = {
   type: string;
@@ -325,13 +325,13 @@ export async function claudeCliPath(): Promise<string> {
     process.platform === "linux"
       ? isMuslLibc()
         ? [
-          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
-          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
-        ]
+            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
+            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
+          ]
         : [
-          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
-          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
-        ]
+            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
+            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
+          ]
       : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${ext}`];
   for (const candidate of candidates) {
     try {
@@ -342,7 +342,7 @@ export async function claudeCliPath(): Promise<string> {
   }
   throw new Error(
     `Claude native binary not found for ${process.platform}-${process.arch}. ` +
-    `Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set CLAUDE_CODE_EXECUTABLE.`,
+      `Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set CLAUDE_CODE_EXECUTABLE.`,
   );
 }
 
@@ -1040,6 +1040,8 @@ export class ClaudeAcpAgent implements Agent {
                 if (message.state === "idle") {
                   if (session.cancelled) {
                     stopReason = "cancelled";
+                  } else if (!promptReplayed) {
+                    break;
                   }
                   return { stopReason, usage: sessionUsage(session) };
                 }
@@ -1052,14 +1054,14 @@ export class ClaudeAcpAgent implements Agent {
                   : message.memories.map((m) => ({ path: m.path }));
                 const content = isSynthesis
                   ? message.memories
-                    .filter(
-                      (m): m is (typeof message.memories)[number] & { content: string } =>
-                        typeof m.content === "string",
-                    )
-                    .map((m) => ({
-                      type: "content" as const,
-                      content: { type: "text" as const, text: m.content },
-                    }))
+                      .filter(
+                        (m): m is (typeof message.memories)[number] & { content: string } =>
+                          typeof m.content === "string",
+                      )
+                      .map((m) => ({
+                        type: "content" as const,
+                        content: { type: "text" as const, text: m.content },
+                      }))
                   : [];
                 const count = message.memories.length;
                 const title = isSynthesis
@@ -1442,9 +1444,9 @@ export class ClaudeAcpAgent implements Agent {
             const content =
               message.type === "assistant"
                 ? // Handled by stream events above
-                message.message.content.filter(
-                  (item) => !["text", "thinking"].includes(item.type),
-                )
+                  message.message.content.filter(
+                    (item) => !["text", "thinking"].includes(item.type),
+                  )
                 : message.message.content;
 
             for (const notification of toAcpNotifications(
@@ -2294,11 +2296,11 @@ export class ClaudeAcpAgent implements Agent {
       // the caller is assumed to have full control over model configuration.
       ...(!userProvidedOptions?.settings &&
         modelConfig && {
-        settings: {
-          ...(modelConfig.modelOverrides && { modelOverrides: modelConfig.modelOverrides }),
-          ...(modelConfig.availableModels && { availableModels: modelConfig.availableModels }),
-        },
-      }),
+          settings: {
+            ...(modelConfig.modelOverrides && { modelOverrides: modelConfig.modelOverrides }),
+            ...(modelConfig.availableModels && { availableModels: modelConfig.availableModels }),
+          },
+        }),
       env: {
         ...process.env,
         ...userProvidedOptions?.env,
@@ -2473,12 +2475,12 @@ export class ClaudeAcpAgent implements Agent {
       if (effectiveMode === "auto") {
         this.logger.error(
           `permissions.defaultMode "auto" is not available for model ` +
-          `"${models.currentModelId}"; falling back to "default".`,
+            `"${models.currentModelId}"; falling back to "default".`,
         );
       } else {
         this.logger.error(
           `permissions.defaultMode "${effectiveMode}" is not available in ` +
-          `this session; falling back to "default".`,
+            `this session; falling back to "default".`,
         );
       }
       effectiveMode = "default";
@@ -3018,10 +3020,10 @@ function getAvailableSlashCommands(commands: SlashCommand[]): AvailableCommand[]
     .map((command) => {
       const input = command.argumentHint
         ? {
-          hint: Array.isArray(command.argumentHint)
-            ? command.argumentHint.join(" ")
-            : command.argumentHint,
-        }
+            hint: Array.isArray(command.argumentHint)
+              ? command.argumentHint.join(" ")
+              : command.argumentHint,
+          }
         : null;
       let name = command.name;
       if (command.name.endsWith(" (MCP)")) {

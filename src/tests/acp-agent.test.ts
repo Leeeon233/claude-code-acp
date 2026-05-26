@@ -3823,6 +3823,7 @@ describe("memory_recall handling", () => {
       sessionUpdate: async (notification: any) => {
         updates.push(notification);
       },
+      extMethod: async () => {},
     } as unknown as AgentSideConnection;
     const agent = new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
     return { agent, updates };
@@ -4001,6 +4002,7 @@ describe("post-error recovery", () => {
   function createMockAgent() {
     const mockClient = {
       sessionUpdate: async () => {},
+      extMethod: async () => {},
     } as unknown as AgentSideConnection;
     return new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
   }
