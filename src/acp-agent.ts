@@ -355,6 +355,10 @@ function isMuslLibc(): boolean {
   return !report?.header?.glibcVersionRuntime;
 }
 
+function shouldHideClaudeAuth(): boolean {
+  return process.argv.includes("--hide-claude-auth");
+}
+
 // Bypass Permissions doesn't work if we are a root/sudo user
 const IS_ROOT = (process.geteuid?.() ?? process.getuid?.()) === 0;
 const ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX;
@@ -705,7 +709,7 @@ export class ClaudeAcpAgent implements Agent {
         };
       }
 
-      if (supportsTerminalAuth || supportsMetaTerminalAuth) {
+      if (!shouldHideClaudeAuth() && (supportsTerminalAuth || supportsMetaTerminalAuth)) {
         terminalAuthMethods.push(remoteLoginMethod);
       }
     } else {
@@ -743,8 +747,10 @@ export class ClaudeAcpAgent implements Agent {
         };
       }
 
-      if (supportsTerminalAuth || supportsMetaTerminalAuth) {
+      if (!shouldHideClaudeAuth() && (supportsTerminalAuth || supportsMetaTerminalAuth)) {
         terminalAuthMethods.push(claudeLoginMethod);
+      }
+      if (supportsTerminalAuth || supportsMetaTerminalAuth) {
         terminalAuthMethods.push(consoleLoginMethod);
       }
     }
@@ -2453,6 +2459,17 @@ export class ClaudeAcpAgent implements Agent {
         throw RequestError.resourceNotFound(sessionId);
       }
       throw error;
+    }
+
+    if (
+      shouldHideClaudeAuth() &&
+      initializationResult.account.subscriptionType &&
+      !this.gatewayAuthRequest
+    ) {
+      throw RequestError.authRequired(
+        undefined,
+        "This integration does not support using claude.ai subscriptions.",
+      );
     }
 
     // Apply user's `availableModels` allowlist from settings.json before any
